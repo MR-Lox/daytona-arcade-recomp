@@ -12,12 +12,14 @@
 
 namespace tools {
 
-// scripts/inputs format: "frames N", "<from>-<to> name=value" or "<at> name=value".
+// scripts/inputs format: "frames N", "<from>-<to> name=value" or "<at> name=value";
+// "raw=0xIIJJSSAABB" sets IN0, IN1, steer, accel and brake at once (the game's
+// M2_RECORD_INPUTS recordings).
 struct Script {
     struct Line {
         uint64_t from, to;
         std::string name;
-        unsigned value;
+        uint64_t value;
     };
     std::vector<Line> lines;
     void load(const std::string &path) {
@@ -35,7 +37,7 @@ struct Script {
             l.from = std::stoull(range.substr(0, dash));
             l.to = dash == std::string::npos ? l.from : std::stoull(range.substr(dash + 1));
             l.name = kv.substr(0, eq);
-            l.value = unsigned(std::stoul(kv.substr(eq + 1), nullptr, 0));
+            l.value = std::stoull(kv.substr(eq + 1), nullptr, 0);
             lines.push_back(l);
         }
     }
@@ -50,7 +52,10 @@ struct Script {
         static const uint8_t gearvalue[5] = {0, 2, 1, 6, 5}; // MAME daytona_gearbox_r
         for (const Line &l : lines) {
             if (frame < l.from || frame > l.to) continue;
-            if (l.name == "steer") in.steer = uint8_t(l.value);
+            if (l.name == "raw") {
+                in.in0 = uint8_t(l.value >> 32), in.in1 = uint8_t(l.value >> 24), in.steer = uint8_t(l.value >> 16);
+                in.accel = uint8_t(l.value >> 8), in.brake = uint8_t(l.value);
+            } else if (l.name == "steer") in.steer = uint8_t(l.value);
             else if (l.name == "accel") in.accel = uint8_t(l.value);
             else if (l.name == "brake") in.brake = uint8_t(l.value);
             else if (l.name.compare(0, 4, "gear") == 0 && l.value) {

@@ -1708,7 +1708,19 @@ void Geo::parse_object(geo_state *geo, GeoPtr obp, uint32_t obc)
    with wheels of its own (more polygons, slightly smaller); the bonnet view, a
    model of the bonnet and dashboard in the body's space. */
 namespace {
-constexpr uint32_t kCarBody = 0x0095ff9d, kCarBodyPart = 0x00961bbf, kCarShadow = 0x008d7ab7, kCarReflection = 0x00000004;
+// the body and its part: the automatic's and the manual's (another livery), and the same in
+// the polygon ROM's other copy; then the body dented by crashes, the automatic's and the
+// manual's in 7 stages each (in both copies; found as the models whose polygons are the body's
+// with other vertices)
+constexpr uint32_t kCarBodies[] = {
+	0x0095ff9d, 0x00960dae, 0x009dff9d, 0x009e0dae,
+	0x008dda42, 0x008de853, 0x008df664, 0x008e1286, 0x008e2ea8, 0x008e4aca, 0x008e830e,
+	0x008ebb52, 0x008ec963, 0x008ed774, 0x008ef396, 0x008f0fb8, 0x008f2bda, 0x008f641e,
+	0x0085da42, 0x0085e853, 0x0085f664, 0x00861286, 0x00862ea8, 0x00864aca, 0x0086830e,
+	0x0086bb52, 0x0086c963, 0x0086d774, 0x0086f396, 0x00870fb8, 0x00872bda, 0x0087641e,
+};
+constexpr uint32_t kCarBodyParts[] = {0x00961bbf, 0x00961cb0, 0x009e1bbf, 0x009e1cb0};
+constexpr uint32_t kCarShadow = 0x008d7ab7, kCarReflection = 0x00000004;
 constexpr uint32_t kCarBonnetView = 0x0094fff9;
 // how much nearer a decal sorts (a headlight's cross on its lens): the polygons are drawn
 // nearest first and none paints over another, so the part on top must sort first
@@ -1761,7 +1773,7 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 	// the rasterizer's end of an object, as after a parse: two points, then attribute 0
 	auto end_object = [&] { for (int i = 0; i < 7; i++) model2_3d_push(raster, 0); };
 	const float none[3] = {0, 0, 0};
-	if (address == kCarBody)
+	if (std::find(std::begin(kCarBodies), std::end(kCarBodies), address) != std::end(kCarBodies))
 	{
 		std::copy(geo->matrix, geo->matrix + 12, car_body_);
 		car_body_valid_ = true;
@@ -1779,7 +1791,7 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 		end_object();
 		return true;
 	}
-	if (address == kCarBodyPart)
+	if (std::find(std::begin(kCarBodyParts), std::end(kCarBodyParts), address) != std::end(kCarBodyParts))
 	{
 		end_object();
 		return true;
@@ -1813,6 +1825,10 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 	const float o[3] = {d[0] * b[0] + d[1] * b[1] + d[2] * b[2], d[0] * b[3] + d[1] * b[4] + d[2] * b[5],
 	                    d[0] * b[6] + d[1] * b[7] + d[2] * b[8]};
 	if (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] > 16.0f) return false; // not under the player's car
+	// a wheel turned off the body's axle (the pit crew changing it): the game's own, where the game puts it
+	const float axle = m[0] * b[0] + m[1] * b[1] + m[2] * b[2];
+	if (axle * axle < 0.5f * (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]) * (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]))
+		return false;
 	const int corner = (o[2] > 0 ? CarMod::FL : CarMod::RL) + (o[0] > 0 ? 1 : 0);
 	const auto &w = mod->wheels[corner];
 	const float at[3] = {b[9] + w[0] * b[0] + w[1] * b[3] + w[2] * b[6], b[10] + w[0] * b[1] + w[1] * b[4] + w[2] * b[7],
