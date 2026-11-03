@@ -4,7 +4,8 @@ your own: the launcher's Game tab > Custom car draws it in place of the
 player's car (Revision A).
 
   make_car_mod.py IN.obj OUT.m2car [--length 3.05] [--forward +x] [--up +y]
-                  [--wheels REGEX] [--skip REGEX] [--wheels-from OTHER.obj]
+                  [--wheels REGEX] [--skip REGEX] [--wheels-from OTHER.obj | --wheels-m2car OLD.m2car]
+                  [--glass REGEX] [--glass-band REGEX:LO:HI] [--wheel-width W] [--wheel-inset D] [--decal REGEX]
 
 --length: the car's real length in metres (the model is scaled to it).
 --forward, --up: the model's axes (+x, -z, ...); its right is forward x up,
@@ -15,6 +16,23 @@ wheels, by corner: their centres and sizes place the game's wheels (or these
 wheels themselves) under the car. --skip: groups to leave out (in both
 files). --wheels-from: the wheels from another OBJ in the same coordinates
 (the same model exported with its wheels), for a model exported without them.
+--wheels-m2car: for a model without wheels, the wheels of an earlier .m2car of
+it (made with the same --length): its four wheels, and the body placed where
+that car's was (its bottom, front and middle).
+--glass: groups or materials that are glass (windows), a regular expression;
+--glass-band REGEX:LO:HI: the faces of the groups REGEX whose centres are LO
+to HI metres above the ground and that do not face up, for windows modelled
+in the body. The game draws glass reflecting the sky. tools/car_glass_picker.html
+picks windows by hand: it saves the OBJ with them in the material "Glass"
+(then --glass "^Glass$").
+--decal: groups or materials that lie on other faces (a headlight's cross on
+its lens, a badge): the game sorts them a little nearer, so they stay on top.
+--wheel-inset: the wheels moved D metres towards the middle, under the arches
+(a tyre flush with an arch's edge fights it in the game's sort).
+--max-edge: large triangles are cut into pieces with edges up to this long
+(metres, default 0.3; 0 keeps them whole), for the game's painter's sort.
+--wheel-width: the tyres' width in metres: the game's wheels are drawn that
+wide (by default as wide as their size makes them), to fit narrow arches.
 
 The car stands on the game's ground, its wheels centred under the game's car
 (their midpoint between the axles at the game's). Colours: each material's
@@ -30,6 +48,19 @@ AXES = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+
 WHEELS = r"(^|[^a-z])(w-|wheel|roue|pneu|tyre|tire|jante|rim)"
 GROUND = -0.03      # the game car's ground in its body space (its wheels' bottoms)
 AXLES_MID = 0.0075  # the game car's midpoint between its axles (z)
+
+
+def split(tri, max_edge):
+    """The triangle in pieces with no edge longer than max_edge (each longest
+    edge halved in turn): the game sorts its polygons one by one (painter's
+    order, no depth buffer), and a large one covers the small parts near it."""
+    edges = [(math.dist(tri[k], tri[(k + 1) % 3]), k) for k in range(3)]
+    length, k = max(edges)
+    if max_edge <= 0 or length <= max_edge:
+        return [tri]
+    a, b, c = tri[k], tri[(k + 1) % 3], tri[(k + 2) % 3]
+    m = tuple((a[i] + b[i]) / 2 for i in range(3))
+    return split((a, m, c), max_edge) + split((m, b, c), max_edge)
 
 
 def cross(a, b):
@@ -85,6 +116,60 @@ def load(path):
     return verts, normals, faces, materials
 
 
+def place_on_wheels(faces, wheel_re, game, corners):
+    """The wheels, by corner (left/right of the wheels' middle, ahead/behind),
+    their groups' faces into corners; and "shift", which stands the car on
+    the game's ground with its axles' midpoint at the game's, centred."""
+    wheel_faces = [f for f in faces if wheel_re.search(f[2])]
+    if not wheel_faces:
+        sys.exit("make_car_mod: no wheel groups (see --wheels, --wheels-m2car)")
+    wv = {i for f in wheel_faces for i in f[0]}
+    mid_x = (max(game[i][0] for i in wv) + min(game[i][0] for i in wv)) / 2
+    mid_z = (max(game[i][2] for i in wv) + min(game[i][2] for i in wv)) / 2
+    for f in wheel_faces:
+        c = [game[i] for i in f[0]]
+        cx, cz = sum(p[0] for p in c) / len(c), sum(p[2] for p in c) / len(c)
+        corners[("F" if cz > mid_z else "R") + ("R" if cx > mid_x else "L")].append(f)
+    wheels = {}
+    for name, fs in corners.items():
+        if not fs:
+            sys.exit(f"make_car_mod: no wheel at {name}")
+        pts = [game[i] for f in fs for i in f[0]]
+        lo = [min(p[k] for p in pts) for k in range(3)]
+        hi = [max(p[k] for p in pts) for k in range(3)]
+        wheels[name] = [(lo[k] + hi[k]) / 2 for k in range(3)] + [max(hi[1] - lo[1], hi[2] - lo[2]) / 2]
+    bottom = min(w[1] - w[3] for w in wheels.values())
+    axles = (wheels["FL"][2] + wheels["FR"][2] + wheels["RL"][2] + wheels["RR"][2]) / 4
+    shift = (-mid_x, GROUND - bottom, AXLES_MID - axles)
+    for w in wheels.values():
+        for k in range(3):
+            w[k] += shift[k]
+    wheels["shift"] = shift
+    return wheels
+
+
+def like_m2car(path, pts):
+    """The wheels of an earlier .m2car, and the shift that puts these body
+    points where its body was: the same bottom, front and middle."""
+    wheels, old = {}, []
+    lines = open(path).read().splitlines()
+    for k, line in enumerate(lines):
+        t = line.split()
+        if t and t[0] == "wheel":
+            wheels[t[1]] = [float(x) for x in t[2:6]]
+        elif t and t[0] == "body":
+            for row in lines[k + 1:k + 1 + int(t[1])]:
+                c = [float(x) for x in row.split()[:9]]
+                old += [c[0:3], c[3:6], c[6:9]]
+    if len(wheels) != 4 or not old:
+        sys.exit(f"make_car_mod: {path}: no wheels or no body")
+    lo = [min(p[k] for p in pts) for k in range(3)]
+    hi = [max(p[k] for p in pts) for k in range(3)]
+    olo = [min(p[k] for p in old) for k in range(3)]
+    ohi = [max(p[k] for p in old) for k in range(3)]
+    return wheels, ((olo[0] + ohi[0] - lo[0] - hi[0]) / 2, olo[1] - lo[1], ohi[2] - hi[2])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("obj")
@@ -95,6 +180,13 @@ def main():
     ap.add_argument("--wheels", default=WHEELS)
     ap.add_argument("--skip", default=None)
     ap.add_argument("--wheels-from", default=None)
+    ap.add_argument("--wheels-m2car", default=None)
+    ap.add_argument("--glass", default=None)
+    ap.add_argument("--glass-band", default=None)
+    ap.add_argument("--wheel-width", type=float, default=None)
+    ap.add_argument("--decal", default=None)
+    ap.add_argument("--max-edge", type=float, default=0.3)
+    ap.add_argument("--wheel-inset", type=float, default=0.0)
     args = ap.parse_args()
 
     forward, up = AXES[args.forward], AXES[args.up]
@@ -123,44 +215,36 @@ def main():
     scale = args.length / (max(zs) - min(zs))
     game = [(p[0] * scale, p[1] * scale, p[2] * scale) for p in game]
 
-    # the wheels: groups by corner (left/right of the wheels' middle, ahead/behind)
-    wheel_faces = [f for f in faces if wheel_re.search(f[2])]
-    if not wheel_faces:
-        sys.exit("make_car_mod: no wheel groups (see --wheels)")
-    wv = {i for f in wheel_faces for i in f[0]}
-    mid_x = (max(game[i][0] for i in wv) + min(game[i][0] for i in wv)) / 2
-    mid_z = (max(game[i][2] for i in wv) + min(game[i][2] for i in wv)) / 2
     corners = {c: [] for c in ("FL", "FR", "RL", "RR")}
-    for f in wheel_faces:
-        c = [game[i] for i in f[0]]
-        cx, cz = sum(p[0] for p in c) / len(c), sum(p[2] for p in c) / len(c)
-        corners[("F" if cz > mid_z else "R") + ("R" if cx > mid_x else "L")].append(f)
-    wheels = {}
-    for name, fs in corners.items():
-        if not fs:
-            sys.exit(f"make_car_mod: no wheel at {name}")
-        pts = [game[i] for f in fs for i in f[0]]
-        lo = [min(p[k] for p in pts) for k in range(3)]
-        hi = [max(p[k] for p in pts) for k in range(3)]
-        wheels[name] = [(lo[k] + hi[k]) / 2 for k in range(3)] + [max(hi[1] - lo[1], hi[2] - lo[2]) / 2]
-
-    # stand it on the game's ground, its axles' midpoint at the game's, centred
-    bottom = min(w[1] - w[3] for w in wheels.values())
-    axles = (wheels["FL"][2] + wheels["FR"][2] + wheels["RL"][2] + wheels["RR"][2]) / 4
-    shift = (-mid_x, GROUND - bottom, AXLES_MID - axles)
-    game = [(p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]) for p in game]
+    if args.wheels_m2car:
+        wheels, shift = like_m2car(args.wheels_m2car, [game[i] for i in used])
+        game = [(p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]) for p in game]
+    else:
+        wheels = place_on_wheels(faces, wheel_re, game, corners)
+        game = [(p[0] + wheels["shift"][0], p[1] + wheels["shift"][1], p[2] + wheels["shift"][2]) for p in game]
+        del wheels["shift"]
     for w in wheels.values():
-        for k in range(3):
-            w[k] += shift[k]
+        w[0] -= math.copysign(args.wheel_inset, w[0])
+    glass_re = re.compile(args.glass, re.I) if args.glass else None
+    decal_re = re.compile(args.decal, re.I) if args.decal else None
+    band = None
+    if args.glass_band:
+        name, lo, hi = args.glass_band.rsplit(":", 2)
+        band = (re.compile(name, re.I), float(lo), float(hi))
 
     def color(material):
         r, g, b = materials.get(material, (0.8, 0.8, 0.8))
         q = lambda x: max(0, min(31, round(x * 31)))
         return q(r) | q(g) << 5 | q(b) << 10
 
+    def glass(group, material, tri_centre_y, normal_y):
+        if glass_re and (glass_re.search(group) or glass_re.search(material)):
+            return True
+        return bool(band and band[0].search(group) and band[1] <= tri_centre_y - GROUND <= band[2] and abs(normal_y) < 0.7)
+
     def triangles(fs):
         out = []
-        for vi, ni, _, material in fs:
+        for vi, ni, group, material in fs:
             # the face's outward normal: its winding's (OBJ space), turned to agree with its vertex normals
             n = (0.0, 0.0, 0.0)
             for k in range(1, len(vi) - 1):
@@ -175,12 +259,16 @@ def main():
                 continue
             gn = (dot(n, right) / ln, dot(n, up) / ln, dot(n, forward) / ln)
             col = color(material)
+            if glass(group, material, sum(game[i][1] for i in vi) / len(vi), gn[1]):
+                col |= 0x8000  # glass (runtime/car_mod.h)
+            if decal_re and (decal_re.search(group) or decal_re.search(material)):
+                col |= 0x10000  # a decal
             for k in range(1, len(vi) - 1):
                 tri = (game[vi[0]], game[vi[k]], game[vi[k + 1]])
                 c = cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]))
                 if dot(c, c) < 1e-14:
                     continue  # degenerate
-                out.append(tri + (gn, col))
+                out += [t + (gn, col) for t in split(tri, args.max_edge)]
         return out
 
     body = triangles([f for f in faces if not wheel_re.search(f[2])])
@@ -188,6 +276,8 @@ def main():
         o.write("m2car 1\n# made by make_car_mod.py from %s: metres, x right, y up, z ahead\n" % args.obj.rsplit("/", 1)[-1])
         for name in ("FL", "FR", "RL", "RR"):
             o.write("wheel %s %.4f %.4f %.4f %.4f\n" % (name, *wheels[name]))
+        if args.wheel_width:
+            o.write("wheelwidth %.4f\n" % args.wheel_width)
 
         def write(header, tris):
             o.write("%s %d\n" % (header, len(tris)))
@@ -196,7 +286,8 @@ def main():
 
         write("body", body)
         for name in ("FL", "FR", "RL", "RR"):
-            write("wheelmesh " + name, triangles(corners[name]))
+            if corners[name]:
+                write("wheelmesh " + name, triangles(corners[name]))
     size = [max(p[k] for p in (game[i] for i in used)) - min(p[k] for p in (game[i] for i in used)) for k in range(3)]
     print(f"make_car_mod: {len(body)} body triangles, {sum(len(v) for v in corners.values())} wheel faces; "
           f"{size[0]:.2f} x {size[1]:.2f} x {size[2]:.2f} m; wheels "

@@ -52,6 +52,7 @@
 #include <utility>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -155,6 +156,52 @@ template <typename C> void save_file(const std::string &path, const C &from) {
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char *>(from.data()), std::streamsize(from.size()));
 }
+
+// M2_RECORD_INPUTS=DIR: the inputs of each game started (each in its own
+// folder, DIR/run_<date>_<time>) as inputs.txt in scripts/inputs format (a
+// "raw" line per run of frames), with the settings EEPROM and backup RAM it
+// started from: tools/m2modeldump and m2gpushot --inputs RUN/inputs.txt
+// --nvram RUN replay it frame for frame.
+class InputRecorder {
+public:
+    static std::string run_dir(const std::string &dir) {
+        const std::time_t now = std::time(nullptr);
+        char name[32];
+        std::strftime(name, sizeof name, "/run_%Y%m%d_%H%M%S", std::localtime(&now));
+        std::string run = dir + name;
+        SDL_CreateDirectory(run.c_str());
+        return run;
+    }
+    InputRecorder(const std::string &dir, rt::GameLoop &game) : out_(dir + "/inputs.txt") {
+        save_file(dir + "/ioboard_eeprom.bin", game.board().io().eeprom);
+        save_file(dir + "/backup_ram.bin", game.board().backup_ram());
+        out_ << "# recorded by daytona (M2_RECORD_INPUTS)\n";
+    }
+    ~InputRecorder() { flush(); }
+    void frame(uint64_t at, const rt::Inputs &in) {
+        const uint64_t raw = uint64_t(in.in0) << 32 | uint64_t(in.in1) << 24 | uint64_t(in.steer) << 16 |
+                             uint64_t(in.accel) << 8 | in.brake;
+        if (count_ && raw == raw_ && at == from_ + count_) {
+            count_++;
+            return;
+        }
+        flush();
+        from_ = at, count_ = 1, raw_ = raw;
+    }
+    bool ok() const { return bool(out_); }
+
+private:
+    void flush() {
+        if (!count_) return;
+        char line[64];
+        std::snprintf(line, sizeof line, "%llu-%llu raw=0x%010llx\n", (unsigned long long)from_,
+                      (unsigned long long)(from_ + count_ - 1), (unsigned long long)raw_);
+        out_ << line << std::flush;
+        count_ = 0;
+    }
+    std::ofstream out_;
+    uint64_t from_ = 0, count_ = 0, raw_ = 0;
+};
 
 int fail(const char *what) {
 	char msg[4096];
@@ -323,6 +370,7 @@ int main(int argc, char **argv) {
     app::ForceFeedback ffb; // the drive board on the steering device
     std::unique_ptr<app::TcpLink> link; // link play (declared first: outlives the game, which holds it)
     std::unique_ptr<rt::GameLoop> game;
+    std::unique_ptr<InputRecorder> recorder; // M2_RECORD_INPUTS
     const std::string eeprom_path = pref_file("ioboard_eeprom.bin"), backup_path = pref_file("backup_ram.bin");
     auto save_nv = [&] {
         if (!game) return;
@@ -334,6 +382,7 @@ int main(int argc, char **argv) {
         ffb.reset(); // a new game: the drive board as at power-on
         native_audio.close(); // joins callback before replacing its ROMs/engine
         audio.close();
+        recorder.reset();
         game.reset();
         link.reset();
         have_audio = false;
@@ -359,6 +408,11 @@ int main(int argc, char **argv) {
                 ? "native (experimental, 48000 Hz device clock; no reference sound board)" : "reference");
             load_file(eeprom_path, game->board().io().eeprom);
             load_file(backup_path, game->board().backup_ram());
+            if (const char *dir = SDL_getenv("M2_RECORD_INPUTS"); dir && *dir) {
+                const std::string run = InputRecorder::run_dir(dir);
+                recorder = std::make_unique<InputRecorder>(run, *game);
+                std::printf("daytona: recording inputs to %s/inputs.txt%s\n", run.c_str(), recorder->ok() ? "" : " (cannot write)");
+            }
             if (cfg.link) { // link play: the communication board on TCP
                 link = std::make_unique<app::TcpLink>(uint16_t(cfg.link_port), cfg.link_next);
                 if (!link->error().empty()) throw std::runtime_error("Link play: " + link->error());
@@ -559,6 +613,7 @@ int main(int argc, char **argv) {
                 rt::Inputs inputs = cfg.controls.sample(SDL_GetKeyboardState(nullptr), devices);
                 if (cfg.hold_test != test_hold.armed()) cfg.hold_test ? test_hold.arm() : test_hold.cancel();
                 if (test_hold.apply(game->frames(), inputs.in0)) cfg.hold_test = false; // held: the box clears
+                if (recorder) recorder->frame(game->board().frame(), inputs);
                 game->run_frame(inputs);
 #ifdef M2_MOBILE
                 touch.consumed();

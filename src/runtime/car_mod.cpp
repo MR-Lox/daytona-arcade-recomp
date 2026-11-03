@@ -32,6 +32,8 @@ bool read_tris(std::istream &in, size_t count, std::vector<CarMod::Tri> &out) {
             for (float c : p)
                 if (!std::isfinite(c)) return false;
         t.color = uint16_t(color & 0x7fff);
+        t.glass = (color & 0x8000) != 0;
+        t.decal = (color & 0x10000) != 0;
         out.push_back(t);
     }
     return true;
@@ -62,6 +64,9 @@ std::shared_ptr<CarMod> CarMod::load(const std::string &path, std::string *error
             for (float &v : mod->wheels[c]) in >> v;
             if (!in || !(mod->wheels[c][3] > 0)) return fail("bad wheel " + name);
             wheels |= 1 << c;
+        } else if (word == "wheelwidth") {
+            in >> mod->wheel_width;
+            if (!in || !(mod->wheel_width > 0)) return fail("bad wheelwidth");
         } else if (word == "body" || word == "wheelmesh") {
             int c = -1;
             if (word == "wheelmesh") {
