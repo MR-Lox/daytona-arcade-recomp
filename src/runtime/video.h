@@ -242,6 +242,7 @@ private:
     bool palette_dirty_ = false;
     int crtc_x_ = 0, crtc_y_ = 0, render_x_ = 90, render_y_ = -8;
     uint8_t gamma_[256];
+    uint32_t calibration_generation_ = 0; // the monitor calibration gamma_ holds
     std::vector<uint16_t> pixmap_[4];
     std::vector<uint8_t> flags_[4];
 #ifdef M2_DC_SPEED

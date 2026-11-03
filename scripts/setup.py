@@ -163,6 +163,8 @@ def cached(build, key):
 def configure_and_build(build, romset="daytona93"):
     say("Configuring and building" + ("" if romset == "daytona93" else f" ({romset})"))
     cmd = ["cmake", "-S", ".", "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DM2_ROMSET=" + romset]
+    if platform.system() == "Darwin":
+        cmd += ["-DM2_NATIVE_CPU=ON"]  # tuned for this Mac's CPU (Apple Silicon or Intel)
     want = {}  # cache entries that must match, or the build directory is reconfigured
     if WINDOWS and not (shutil.which("cl") and shutil.which("ninja")):
         # Visual Studio generator: finds the compiler without a developer prompt.
@@ -275,6 +277,8 @@ def main():
                     if os.path.exists(p)), None)
         if exe:
             games.append((label, exe))
+            if platform.system() == "Darwin":  # also as an application, for the Finder and the Dock
+                run(["sh", os.path.join("scripts", "make_mac_app.sh"), set_dir], check=False)
     if not games:
         say("No ROM set: the tools are built, the game is not")
         print(no_rom_help())
@@ -284,6 +288,9 @@ def main():
     say("Done")
     for label, exe in games:
         print(f"\n{label} is built. Start it with:\n\n    " + os.path.relpath(exe, ROOT))
+        app = os.path.join(os.path.dirname(exe), "Daytona USA.app")
+        if os.path.isdir(app):
+            print(f"\nor open the application {os.path.relpath(app, ROOT)}")
     if games:
         print()
 

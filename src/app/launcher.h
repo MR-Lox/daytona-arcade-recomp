@@ -38,11 +38,14 @@ public:
     void set_ffb_device(const char *kind) { ffb_device_ = kind; } // what force feedback is playing on
     void set_link_status(const std::string &s) { link_status_ = s; } // link play, for the Game tab
     void set_pacing_status(const std::string &s) { pacing_status_ = s; } // frame pacing now, for the Game tab
+    void set_crt_error(const std::string &s) { crt_error_ = s; } // why the CRT filter cannot run ("" when it can)
+    void set_car_status(const std::string &s) { car_status_ = s; } // the custom car: loaded, or why not
 
 private:
     void check_rom();
     void browse();
     static void SDLCALL dialog_done(void *self, const char *const *files, int filter);
+    static void SDLCALL car_dialog_done(void *self, const char *const *files, int filter);
 
     Config &cfg_;
     SDL_Window *window_;
@@ -52,6 +55,11 @@ private:
     const char *ffb_device_ = "none";
     std::string link_status_ = "off";
     std::string pacing_status_;
+    std::string crt_error_;
+    std::string car_status_;
+    char car_buf_[1024] = {};
+    std::string car_dialog_result_; // (dialog_mutex_)
+    bool car_dialog_pending_ = false;
     char link_next_buf_[256] = {};
     char path_buf_[1024] = {};
 

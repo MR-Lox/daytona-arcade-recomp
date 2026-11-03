@@ -40,5 +40,38 @@ int main() {
         loaded.aspect = value;
         check(loaded.aspect_ratio() == 0, "non-finite and invalid aspect rejected");
     }
+    check(old.supersampling == 1 && old.texture_detail == 0 && old.scaling.empty(), "graphics default to the original");
+    app::Config graphics;
+    graphics.supersampling = 0;
+    graphics.texture_detail = 2;
+    graphics.scaling = "integer";
+    std::ostringstream graphics_out;
+    graphics.write(graphics_out);
+    app::Config graphics_in;
+    std::istringstream graphics_stream(graphics_out.str());
+    graphics_in.read(graphics_stream);
+    check(graphics_in.supersampling == 0 && graphics_in.texture_detail == 2 && graphics_in.scaling == "integer",
+          "match-window super sampling, texture detail and scaling survive save/load");
+    std::istringstream graphics_bad("supersampling=99\ntexture_detail=-3\nscaling=blurry\n");
+    graphics_in.read(graphics_bad);
+    check(graphics_in.supersampling == app::Config::kMaxSupersampling && graphics_in.texture_detail == 0 &&
+              graphics_in.scaling.empty(),
+          "out of range graphics settings are clamped");
+    check(old.crt == 0, "the CRT filter is off by default");
+    app::Config crt;
+    crt.crt = 3;
+    crt.crt_scanlines = 0.5f;
+    crt.crt_curvature = 0.1f;
+    std::ostringstream crt_out;
+    crt.write(crt_out);
+    app::Config crt_in;
+    std::istringstream crt_stream(crt_out.str());
+    crt_in.read(crt_stream);
+    check(crt_in.crt == 3 && crt_in.crt_scanlines == 0.5f && crt_in.crt_curvature == 0.1f, "CRT settings survive save/load");
+    std::istringstream crt_bad("crt=9\ncrt_glow=nan\ncrt_mask=7\ncrt_curvature=-1\n");
+    crt_in.read(crt_bad);
+    check(crt_in.crt == 4 && crt_in.crt_glow == app::Config().crt_glow && crt_in.crt_mask == 1.0f &&
+              crt_in.crt_curvature == 0.0f,
+          "out of range CRT settings are clamped, invalid ones ignored");
     return failures ? 1 : 0;
 }

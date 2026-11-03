@@ -119,6 +119,7 @@ public:
     // nullptr: no link, the registers stay plain). Set before the game runs.
     void set_link(LinkTransport *transport, bool framesync = false);
     const CommBoard *comm_board() const { return comm_board_.get(); }
+    Geo &geo() { return *geo_; } // the geometrizer (model capture: tools/m2modeldump)
 #ifdef M2_DC_SPIN_SKIP
     uint64_t spin_skipped() const { return spin_skipped_; } // instructions skipped in the frame wait (read_byte)
 #endif

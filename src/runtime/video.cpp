@@ -47,7 +47,8 @@ Video::Video(const uint8_t *tile_ram, const uint8_t *char_ram)
     for (auto &p : pens565_) p = rgb565(rgb(0, 0, 0));
     for (auto &p : pens1555_) p = argb1555(rgb(0, 0, 0));
 #endif
-    for (int i = 0; i < 256; i++) gamma_[i] = uint8_t(std::max((double(i) - 64.0) * 255.0 / 191.0, 0.0));
+    fill_gamma_table(gamma_, calibration()); // MAME video_start's, unless calibrated
+    calibration_generation_ = calibration_generation();
     for (int l = 0; l < 4; l++) pixmap_[l].assign(512 * 512, 0), flags_[l].assign(512 * 512, 0);
     system24_tile_generations_.resize(4 * 4096);
 #ifndef M2_VITA_RENDER_OPT
@@ -682,6 +683,12 @@ void Video::screen_update(const std::vector<GeoPoly> &polys, int windows, const 
     uint64_t before = ticks();
     // Retain the reference's sticky palette-dirty behavior. palette_w marks
     // cached composition dirty only if the resulting RGB value really changed.
+    if (calibration_generation_ != calibration_generation()) { // the launcher's monitor calibration changed
+        calibration_generation_ = calibration_generation();
+        fill_gamma_table(gamma_, calibration());
+        raster_.set_calibration(calibration());
+        palette_dirty_ = true;
+    }
     if (palette_dirty_) {
         for (uint32_t i = 0; i < 0x1000; i++) palette_w(i, mem.palram, mem.colorxlat);
         palette_dirty_ = false;

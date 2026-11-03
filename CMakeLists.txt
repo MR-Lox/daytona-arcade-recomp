@@ -27,6 +27,35 @@ else()
     add_compile_options(-Wall -Wextra -fno-fast-math -ffp-contract=off)
 endif()
 
+# Tuning for the machine that builds it (scripts/setup.py turns it on for
+# macOS): -mcpu=native on ARM64 (Apple M1/M2/M3...), -march=native on x86.
+# The binary may not run on an older CPU. FP stays exact: -ffp-contract=off
+# above still forbids fused multiply-adds.
+option(M2_NATIVE_CPU "Tune the build for this machine's CPU" OFF)
+if(M2_NATIVE_CPU AND NOT MSVC AND NOT CMAKE_CROSSCOMPILING AND NOT IOS AND NOT ANDROID)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64")
+        add_compile_options(-mcpu=native)
+    else()
+        add_compile_options(-march=native)
+    endif()
+endif()
+# Link-time optimisation across the runtime and the generated game code
+# (ThinLTO with Clang). Slower to link.
+option(M2_LTO "Link-time optimisation of the game" OFF)
+if(M2_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT M2_IPO_OK OUTPUT M2_IPO_ERR)
+    if(M2_IPO_OK)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            add_compile_options(-flto=thin)
+            add_link_options(-flto=thin)
+        endif()
+    else()
+        message(WARNING "M2_LTO: link-time optimisation unavailable: ${M2_IPO_ERR}")
+    endif()
+endif()
+
 # Berkeley SoftFloat 3e (scripts/fetch_softfloat.sh): the extF80 reference
 # model for i960 FP. 8086-SSE specialisation, FAST_INT64 build.
 set(SOFTFLOAT_DIR ${CMAKE_SOURCE_DIR}/extern/softfloat)
@@ -103,6 +132,8 @@ add_library(runtime STATIC
     src/runtime/geo.cpp
     src/runtime/raster.cpp
     src/runtime/video.cpp
+    src/runtime/calibration.cpp
+    src/runtime/car_mod.cpp
     src/runtime/m2_board.cpp
     src/runtime/game_loop.cpp
     src/runtime/zip.cpp
@@ -221,7 +252,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/extern/sdl3/CMakeLists.txt)
         target_compile_options(imgui PRIVATE -w)
     endif()
     # The hardware renderer (SDL_GPU), shared by the app and m2gpushot.
-    add_library(gpurender STATIC src/app/gpu/gpu_renderer.cpp)
+    add_library(gpurender STATIC src/app/gpu/gpu_renderer.cpp src/app/gpu/crt.cpp)
     target_include_directories(gpurender PUBLIC src)
     target_link_libraries(gpurender PUBLIC runtime ${M2_SDL_TARGET})
     add_library(daytona_app OBJECT src/app/main.cpp src/app/launcher.cpp src/app/config.cpp src/app/controls.cpp src/app/ffb.cpp src/app/link_socket.cpp src/app/pacing.cpp)
@@ -248,6 +279,9 @@ if(EXISTS ${GEN_DIR}/gen_table.cpp AND EXISTS ${TGP_GEN} AND EXISTS ${SND_GEN})
     file(GLOB GEN_SOURCES ${GEN_DIR}/*.cpp)
     add_executable(m2native tools/m2native/main.cpp ${GEN_SOURCES} ${TGP_GEN} ${SND_GEN})
     target_link_libraries(m2native PRIVATE runtime)
+    # A model the game draws, as an OBJ (Geo::Capture), for personal use.
+    add_executable(m2modeldump tools/m2modeldump/main.cpp ${GEN_SOURCES} ${TGP_GEN} ${SND_GEN})
+    target_link_libraries(m2modeldump PRIVATE runtime)
     # The game on its own: native board runtime, no trace.
     add_executable(m2run tools/m2run/main.cpp src/app/link_socket.cpp ${GEN_SOURCES} ${TGP_GEN} ${SND_GEN})
     target_link_libraries(m2run PRIVATE runtime)
@@ -338,11 +372,11 @@ target_include_directories(test_scenery PRIVATE src)
 add_test(NAME scenery COMMAND test_scenery)
 
 # Geometrizer clipping and display-list streaming (shared runtime code).
-add_executable(test_geo_clip tests/test_geo_clip.cpp)
+add_executable(test_geo_clip tests/test_geo_clip.cpp src/runtime/car_mod.cpp)
 target_include_directories(test_geo_clip PRIVATE src)
 add_test(NAME geo_clip COMMAND test_geo_clip)
 
-add_executable(test_geo_stream tests/test_geo_stream.cpp)
+add_executable(test_geo_stream tests/test_geo_stream.cpp src/runtime/car_mod.cpp)
 target_include_directories(test_geo_stream PRIVATE src)
 add_test(NAME geo_stream COMMAND test_geo_stream)
 
@@ -391,6 +425,14 @@ if(TARGET SDL3::SDL3-static)
     target_include_directories(test_app_config PRIVATE src)
     target_link_libraries(test_app_config PRIVATE runtime SDL3::SDL3-static)
     add_test(NAME app_config COMMAND test_app_config)
+    add_executable(test_calibration tests/test_calibration.cpp)
+    target_include_directories(test_calibration PRIVATE src)
+    target_link_libraries(test_calibration PRIVATE runtime)
+    add_test(NAME calibration COMMAND test_calibration)
+    add_executable(test_car_mod tests/test_car_mod.cpp)
+    target_include_directories(test_car_mod PRIVATE src)
+    target_link_libraries(test_car_mod PRIVATE runtime)
+    add_test(NAME car_mod COMMAND test_car_mod)
     add_executable(test_app_controls tests/test_app_controls.cpp src/app/controls.cpp src/app/ffb.cpp)
     target_include_directories(test_app_controls PRIVATE src)
     target_link_libraries(test_app_controls PRIVATE runtime SDL3::SDL3-static)
@@ -434,7 +476,8 @@ if(M2_VITA_TESTS)
     add_test(NAME vita_gpu_memory COMMAND test_vita_gpu_memory)
 
     add_executable(test_vita_gpu_lifetime tests/test_vita_gpu_lifetime.cpp
-        src/runtime/video.cpp src/runtime/raster.cpp)
+        src/runtime/video.cpp src/runtime/raster.cpp src/runtime/calibration.cpp
+        src/runtime/car_mod.cpp)
     target_include_directories(test_vita_gpu_lifetime PRIVATE tests/vita_gpu_shim src)
     target_compile_definitions(test_vita_gpu_lifetime PRIVATE M2_VITA_RENDER_OPT=1)
     add_test(NAME vita_gpu_lifetime COMMAND test_vita_gpu_lifetime)

@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cmath>
 
 #include <SDL3/SDL.h>
 
@@ -29,6 +28,16 @@ void Config::load() {
     read(f);
 }
 
+namespace {
+
+// A setting from 0 to max; not a number keeps the old value.
+float unit(const std::string &v, float old, float max) {
+    const float value = std::strtof(v.c_str(), nullptr);
+    return std::isfinite(value) && !v.empty() ? std::clamp(value, 0.0f, max) : old;
+}
+
+} // namespace
+
 void Config::read(std::istream &f) {
     std::string line;
     while (std::getline(f, line)) {
@@ -51,7 +60,20 @@ void Config::read(std::istream &f) {
             }
         }
         else if (k == "draw_mode") draw_mode = std::clamp(std::atoi(v.c_str()), 0, 2);
-        else if (k == "supersampling") supersampling = std::clamp(std::atoi(v.c_str()), 1, 4);
+        else if (k == "supersampling") supersampling = std::clamp(std::atoi(v.c_str()), 0, kMaxSupersampling);
+        else if (k == "texture_detail") texture_detail = std::clamp(std::atoi(v.c_str()), 0, 2);
+        else if (k == "scaling") scaling = v == "sharp" || v == "integer" ? v : "";
+        else if (k == "car_mod") car_mod = v == "1";
+        else if (k == "car_path") car_path = v;
+        else if (k == "car_own_wheels") car_own_wheels = v == "1";
+        else if (k == "cal_black") cal_black = std::clamp(std::atoi(v.c_str()), 0, 192);
+        else if (k == "cal_white") cal_white = std::clamp(std::atoi(v.c_str()), 32, 255);
+        else if (k == "cal_gamma") cal_gamma = unit(v, cal_gamma, 2.0f);
+        else if (k == "crt") crt = std::clamp(std::atoi(v.c_str()), 0, 4);
+        else if (k == "crt_scanlines") crt_scanlines = unit(v, crt_scanlines, 1.0f);
+        else if (k == "crt_mask") crt_mask = unit(v, crt_mask, 1.0f);
+        else if (k == "crt_glow") crt_glow = unit(v, crt_glow, 1.0f);
+        else if (k == "crt_curvature") crt_curvature = unit(v, crt_curvature, 0.25f);
         else if (k == "volume") volume = std::clamp(std::strtof(v.c_str(), nullptr), 0.0f, 1.0f);
         else if (k == "mute") mute = v == "1";
         else if (k == "fullscreen_mode") fullscreen_mode = v;
@@ -107,6 +129,19 @@ void Config::write(std::ostream &f) const {
     f << "draw_budget=" << draw_budget << "\n";
     f << "draw_mode=" << draw_mode << "\n";
     f << "supersampling=" << supersampling << "\n";
+    f << "texture_detail=" << texture_detail << "\n";
+    f << "scaling=" << scaling << "\n";
+    f << "car_mod=" << (car_mod ? 1 : 0) << "\n";
+    f << "car_path=" << car_path << "\n";
+    f << "car_own_wheels=" << (car_own_wheels ? 1 : 0) << "\n";
+    f << "cal_black=" << cal_black << "\n";
+    f << "cal_white=" << cal_white << "\n";
+    f << "cal_gamma=" << cal_gamma << "\n";
+    f << "crt=" << crt << "\n";
+    f << "crt_scanlines=" << crt_scanlines << "\n";
+    f << "crt_mask=" << crt_mask << "\n";
+    f << "crt_glow=" << crt_glow << "\n";
+    f << "crt_curvature=" << crt_curvature << "\n";
     f << "volume=" << volume << "\n";
     f << "mute=" << (mute ? 1 : 0) << "\n";
     f << "fullscreen_mode=" << fullscreen_mode << "\n";

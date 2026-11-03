@@ -109,6 +109,18 @@ std::string hex8(uint32_t v) {
     return b;
 }
 
+// The archive's file for a load: by its name, else (sets from older MAME
+// versions name some files differently, e.g. "mpr-16772.19" for
+// "mpr-16772.ic19") the one with its size and CRC. The contents are checked
+// by CRC either way.
+std::map<std::string, Archive::Entry>::const_iterator find_file(const Archive &z, const Load &l) {
+    const auto &entries = z.entries();
+    if (const auto it = entries.find(l.file); it != entries.end()) return it;
+    for (auto it = entries.begin(); it != entries.end(); ++it)
+        if (it->second.has_crc && it->second.crc == l.crc && it->second.size == l.size) return it;
+    return entries.end();
+}
+
 } // namespace
 
 std::vector<RomCheck> check_rom_set(const std::string &zip_path) {
@@ -118,7 +130,7 @@ std::vector<RomCheck> check_rom_set(const std::string &zip_path) {
     for (const Load &l : std::span(set.loads, set.count)) {
         RomCheck c;
         c.file = l.file;
-        const auto it = z->entries().find(l.file);
+        const auto it = find_file(*z, l);
         if (it == z->entries().end()) c.problem = "missing";
         else if (it->second.size != l.size) c.problem = "wrong size";
         else if (it->second.has_crc && it->second.crc != l.crc)
@@ -143,7 +155,8 @@ M2Board::Images import_rom_set(const std::string &zip_path) {
     img.pcm2.assign(0x400000, 0);
     const Set &set = this_set();
     for (const Load &l : std::span(set.loads, set.count)) {
-        const std::vector<uint8_t> data = z->read(l.file); // CRC against the archive's own
+        const auto it = find_file(*z, l);
+        const std::vector<uint8_t> data = z->read(it != z->entries().end() ? it->first : l.file); // CRC against the archive's own
         if (data.size() != l.size || crc32(data.data(), data.size()) != l.crc)
             throw ZipError(std::string(l.file) + ": not the " + set.name + " ROM this build was recompiled from");
         std::vector<uint8_t> *r = nullptr;

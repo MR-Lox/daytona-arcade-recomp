@@ -21,7 +21,10 @@
 #include "app/pacing.h"
 #include "runtime/test_hold.h"
 #include "app/link_socket.h"
+#include "app/gpu/crt.h"
 #include "app/gpu/gpu_renderer.h"
+#include "runtime/calibration.h"
+#include "runtime/car_mod.h"
 #include "app/launcher.h"
 #include "app/native_audio.h"
 #include "runtime/native_sound_engine.h"
@@ -45,6 +48,7 @@
 #include <SDL3/SDL_main.h> // Windows: the WinMain entry point a WIN32 (GUI) program links against
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 #include <cstdio>
 #include <cstring>
@@ -285,6 +289,10 @@ int main(int argc, char **argv) {
     app::GpuRenderer gpu;
     if (!gpu.init(dev, SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM))
         std::fprintf(stderr, "daytona: hardware renderer unavailable: %s\n", gpu.error().c_str());
+    // CRT filter (launcher > CRT effect), drawn onto the swapchain
+    app::CrtFilter crt;
+    if (!crt.init(dev, SDL_GetGPUSwapchainTextureFormat(dev, window)))
+        std::fprintf(stderr, "daytona: CRT filter unavailable: %s\n", crt.error().c_str());
 
     SDL_GPUTextureCreateInfo ti{};
     ti.type = SDL_GPU_TEXTURETYPE_2D;
@@ -308,8 +316,10 @@ int main(int argc, char **argv) {
     int hires_scale = 1, hires_levels = 1;
     SDL_GPUTexture *shown = screen; // the last frame's texture, and its scale
     int shown_scale = 1;
+    int window_scale = 1; // Super sampling > Match window: the frame's last size on screen over the original's
 
     app::Launcher launcher(cfg, window);
+    if (!crt.ok()) launcher.set_crt_error(crt.error());
     app::ForceFeedback ffb; // the drive board on the steering device
     std::unique_ptr<app::TcpLink> link; // link play (declared first: outlives the game, which holds it)
     std::unique_ptr<rt::GameLoop> game;
@@ -511,6 +521,32 @@ int main(int argc, char **argv) {
         if (game && !in_launcher)
             if (const uint64_t wait = pacer.wait_ns(SDL_GetTicksNS())) SDL_DelayPrecise(wait); // VRR: hold the frame
         const uint64_t now = SDL_GetTicksNS();
+        { // custom player car (launcher > Enhancements): loaded when its settings change
+            static std::string loaded_key = "\x01"; // none yet
+            const std::string key = cfg.car_mod ? cfg.car_path + (cfg.car_own_wheels ? "|own" : "|game") : "";
+            if (key != loaded_key) {
+                loaded_key = key;
+                std::shared_ptr<rt::CarMod> car;
+                std::string status;
+                if (cfg.car_mod && !cfg.car_path.empty()) {
+                    car = rt::CarMod::load(cfg.car_path, &status);
+                    if (car) {
+                        car->own_wheels = cfg.car_own_wheels;
+                        status = "Loaded: " + std::to_string(car->body.size()) + " triangles.";
+                    }
+                } else if (cfg.car_mod) {
+                    status = "Choose a .m2car file.";
+                }
+                rt::set_car_mod(car);
+                launcher.set_car_status(status);
+                if (game && have_frame) new_frame = true;
+            }
+        }
+        { // monitor calibration (launcher > Display): the hardware renderer redraws a paused frame with it
+            const uint32_t before = rt::calibration_generation();
+            rt::set_calibration({cfg.cal_black, cfg.cal_white, cfg.cal_gamma});
+            if (rt::calibration_generation() != before && game && have_frame) new_frame = true;
+        }
         if (game && !in_launcher) {
             game->set_aspect(cfg.aspect_ratio()); // widescreen: no-op unless it changed
             game->set_hud_edges(cfg.hud_edges);
@@ -571,24 +607,25 @@ int main(int argc, char **argv) {
         }
         if (new_frame && hardware) {
             screen_w = game->screen_width();
-            const int scale = std::clamp(cfg.supersampling, 1, 4);
+            const int scale = std::clamp(cfg.supersampling ? cfg.supersampling : window_scale, 1,
+                                         app::GpuRenderer::kMaxScale);
             if (scale > 1 && scale != hires_scale) {
                 if (hires) SDL_ReleaseGPUTexture(dev, hires);
                 SDL_GPUTextureCreateInfo hi = ti;
                 hi.width = Uint32(kMaxW * scale);
                 hi.height = Uint32(H * scale);
-                hires_levels = scale >= 4 ? 3 : 2;
+                hires_levels = 1 + int(std::log2(double(scale))); // down to half the scale or less: 2x 2, 4x 3, 8x 4
                 hi.num_levels = Uint32(hires_levels);
                 hires = SDL_CreateGPUTexture(dev, &hi);
                 hires_scale = hires ? scale : 1;
                 if (!hires) std::fprintf(stderr, "daytona: %dx super sampling unavailable: %s\n", scale, SDL_GetError());
             }
             if (scale > 1 && hires) {
-                gpu.render(cmd, hires, screen_w, H, game->board().video(), scale);
+                gpu.render(cmd, hires, screen_w, H, game->board().video(), scale, cfg.texture_detail);
                 SDL_GenerateMipmapsForGPUTexture(cmd, hires);
                 shown = hires, shown_scale = scale;
             } else {
-                gpu.render(cmd, screen, screen_w, H, game->board().video());
+                gpu.render(cmd, screen, screen_w, H, game->board().video(), 1, cfg.texture_detail);
                 shown = screen, shown_scale = 1;
             }
             new_frame = false;
@@ -645,26 +682,48 @@ int main(int argc, char **argv) {
         if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd, window, &swap, &sw, &sh)) return fail("swapchain");
         if (swap) {
             if (have_frame) { // the game's screen at its own shape, letterboxed
-                const double scale = std::min(double(sw) / screen_w, double(sh) / H);
+                double scale = std::min(double(sw) / screen_w, double(sh) / H);
+                if (cfg.scaling == "integer" && scale >= 1) scale = std::floor(scale); // whole pixels only
                 const Uint32 dw = Uint32(screen_w * scale), dh = Uint32(H * scale);
+                window_scale = std::max(1, int(std::ceil(double(dh) / H - 0.01)));
                 // a higher resolution frame: from its smallest level still at least the window's size
                 Uint32 level = 0;
                 while (shown == hires && int(level) + 1 < hires_levels && Uint32((H * shown_scale) >> (level + 1)) >= dh)
                     ++level;
-                SDL_GPUBlitInfo blit{};
-                blit.source.texture = shown;
-                blit.source.mip_level = level;
-                blit.source.w = Uint32(screen_w * shown_scale) >> level;
-                blit.source.h = Uint32(H * shown_scale) >> level;
-                blit.destination.texture = swap;
-                blit.destination.x = (sw - dw) / 2;
-                blit.destination.y = (sh - dh) / 2;
-                blit.destination.w = dw;
-                blit.destination.h = dh;
-                blit.load_op = SDL_GPU_LOADOP_CLEAR;
-                blit.clear_color = SDL_FColor{0, 0, 0, 1};
-                blit.filter = SDL_GPU_FILTER_LINEAR;
-                SDL_BlitGPUTexture(cmd, &blit);
+                if (cfg.crt && crt.ok()) {
+                    // the CRT works from the original resolution: the level nearest it, at least as big
+                    Uint32 crt_level = 0;
+                    while (shown == hires && int(crt_level) + 1 < hires_levels &&
+                           (H * shown_scale) >> (crt_level + 1) >= H)
+                        ++crt_level;
+                    app::CrtFilter::Params params;
+                    params.mask = cfg.crt == 4 ? 0 : cfg.crt == 1 ? 2 : cfg.crt == 2 ? 1 : 3;
+                    params.scanlines = cfg.crt_scanlines;
+                    params.mask_strength = cfg.crt_mask;
+                    params.glow = cfg.crt_glow;
+                    params.curvature = cfg.crt_curvature;
+                    const SDL_Rect dest{int(sw - dw) / 2, int(sh - dh) / 2, int(dw), int(dh)};
+                    crt.draw(cmd, shown, crt_level, Uint32(screen_w * shown_scale) >> crt_level,
+                             Uint32(H * shown_scale) >> crt_level, screen_w, H, swap, dest, params);
+                } else {
+                    SDL_GPUBlitInfo blit{};
+                    blit.source.texture = shown;
+                    blit.source.mip_level = level;
+                    blit.source.w = Uint32(screen_w * shown_scale) >> level;
+                    blit.source.h = Uint32(H * shown_scale) >> level;
+                    blit.destination.texture = swap;
+                    blit.destination.x = (sw - dw) / 2;
+                    blit.destination.y = (sh - dh) / 2;
+                    blit.destination.w = dw;
+                    blit.destination.h = dh;
+                    blit.load_op = SDL_GPU_LOADOP_CLEAR;
+                    blit.clear_color = SDL_FColor{0, 0, 0, 1};
+                    // Sharp and integer scaling: each pixel a block where the frame is enlarged; a
+                    // frame bigger than the window is averaged (linear) either way.
+                    const bool enlarged = blit.source.h < dh;
+                    blit.filter = !cfg.scaling.empty() && enlarged ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+                    SDL_BlitGPUTexture(cmd, &blit);
+                }
             }
             if (draw || !have_frame) { // the launcher on top (or a clear screen)
                 SDL_GPUColorTargetInfo ct{};
@@ -693,6 +752,7 @@ int main(int argc, char **argv) {
     audio.close();
     SDL_WaitForGPUIdle(dev);
     gpu.shutdown();
+    crt.shutdown();
     ImGui_ImplSDLGPU3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

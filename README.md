@@ -49,6 +49,26 @@ In short:
 3. Run the command setup prints at the end (`build/daytona`, or
    `build\Release\daytona.exe` on Windows).
 
+**macOS:** setup tunes the build for your Mac's CPU (`-DM2_NATIVE_CPU=ON`,
+`-mcpu=native` on Apple Silicon; the binary then needs a CPU as recent) and
+also makes `build/Daytona USA.app`, to open from the Finder or the Dock
+(`scripts/make_mac_app.sh` remakes it after a rebuild; it is for your Mac
+only, never to share). `-DM2_LTO=ON` adds link-time optimisation (a slower
+link). Metal is the graphics API used.
+
+**Custom car (Revision A, experimental):** your own model in place of the
+player's car, drawn by the game's own geometrizer and lit as its cars are, its
+wheels (or the game's, moved under it) turning and steering. Make a `.m2car`
+from an OBJ, then pick it in the launcher's Game tab > Enhancements > Custom
+car:
+
+    python3 scripts/make_car_mod.py car.obj build-daytona/models/car.m2car --length 3.05
+
+(`--forward`/`--up` for the model's axes, `--wheels-from` to take the wheels
+from another export of the same model.) Handling and collisions stay the
+game's. `tools/m2modeldump` lists and exports the models the game draws
+(`scripts/obj_to_stl.py` makes them printable): for your own use only.
+
 **Updating:** `git pull`, then run setup again (it recompiles the game from
 your ROM set, since updates can change the generated code).
 
@@ -113,7 +133,16 @@ opens first:
   is checked against the ROM set this build was recompiled from. Graphics API
   (automatic, Vulkan, Direct3D 12, Metal), Renderer (software, the exact
   CPU renderer; or hardware, on the GPU, experimental), Super sampling
-  (hardware renderer: off, or the 3D drawn at 2x to 4x the original resolution), fullscreen, hide the
+  (hardware renderer: off, the 3D drawn at 2x to 8x the original resolution,
+  or Match window, the window's own resolution, for Retina, 4K and 5K
+  displays), Texture detail (hardware renderer: Original, the arcade's own
+  mip levels; High and Highest, one or two levels finer), Scaling (Smooth,
+  as before; Sharp pixels; Integer scaling, whole multiples only), CRT effect
+  (off by default: an arcade monitor's scanlines, slot mask, aperture grille
+  or shadow mask phosphors, glow and curved tube, with sliders; Vulkan and
+  Metal, both renderers), Colours (MAME's colour conversion, the default;
+  Arcade monitor, deeper blacks and richer colours; or black level, white
+  level and gamma by hand), fullscreen, hide the
   mouse cursor in game (it shows again in the launcher), the
   fullscreen mode (borderless, or an exclusive resolution and refresh rate),
   frame pacing (all off: the arcade's own speed on any display; smooth

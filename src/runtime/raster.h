@@ -14,6 +14,7 @@
 // See THIRD_PARTY.md.
 #pragma once
 
+#include "runtime/calibration.h"
 #include "runtime/geo.h"
 
 #include <algorithm>
@@ -57,6 +58,7 @@ public:
     // whose viewport spans the 496-pixel screen may then draw `margin` pixels
     // beyond either side. The layer grows to hold the wider screen.
     void set_wide_margin(int margin);
+    void set_calibration(const Calibration &c); // the monitor calibration (runtime/calibration.h)
     // Widescreen, HUD at the edges. The race HUD's condition panel is drawn
     // with overlay polygons: its box, one checker-shaded polygon (texheader
     // 0x8000) at a fixed near sort z (0x0600; scenery there is above 18000),

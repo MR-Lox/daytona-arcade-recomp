@@ -110,6 +110,13 @@ void SDLCALL Launcher::dialog_done(void *self, const char *const *files, int) {
     } else if (!files) l->error_ = std::string("ROM picker: ") + SDL_GetError();
 }
 
+void SDLCALL Launcher::car_dialog_done(void *self, const char *const *files, int) {
+    auto *l = static_cast<Launcher *>(self);
+    std::lock_guard<std::mutex> g(l->dialog_mutex_);
+    l->car_dialog_pending_ = false;
+    if (files && files[0]) l->car_dialog_result_ = files[0];
+}
+
 void Launcher::browse() {
     static const SDL_DialogFileFilter filters[] = {{"ROM set (zip, 7z)", "zip;7z"}, {"All files", "*"}};
     dialog_pending_ = true;
@@ -380,21 +387,177 @@ Launcher::Result Launcher::draw(bool game_running, const Devices &devices) {
             }
             ImGui::TextDisabled("Double buffered draws every frame, as the game does. Single buffered draws\n"
                                 "every 2nd frame, every third frame every 3rd: faster, the game itself is not slowed.");
-            static const char *supersampling[] = {"Off", "2x", "3x", "4x"};
+            // items 0-7: 1x (off) to 8x; item 8: 0, the window's own resolution
+            static const char *supersampling[] = {"Off", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "Match window"};
+            constexpr int kSsItems = Config::kMaxSupersampling + 1;
             ImGui::BeginDisabled(cfg_.renderer != "hardware");
             ImGui::SetNextItemWidth(200);
-            int ss = std::clamp(cfg_.supersampling, 1, 4) - 1;
-            if (ImGui::Combo("Super sampling", &ss, supersampling, 4)) {
-                cfg_.supersampling = ss + 1;
+            int ss = cfg_.supersampling ? std::clamp(cfg_.supersampling, 1, Config::kMaxSupersampling) - 1 : kSsItems - 1;
+            if (ImGui::Combo("Super sampling", &ss, supersampling, kSsItems)) {
+                cfg_.supersampling = ss == kSsItems - 1 ? 0 : ss + 1;
+                cfg_.save();
+            }
+            static const char *details[] = {"Original", "High", "Highest"};
+            ImGui::SetNextItemWidth(200);
+            int td = std::clamp(cfg_.texture_detail, 0, 2);
+            if (ImGui::Combo("Texture detail", &td, details, 3)) {
+                cfg_.texture_detail = td;
+                cfg_.save();
+            }
+            ImGui::SetItemTooltip("Original: each texture's mip level as the arcade picks it (finer with super\n"
+                                  "sampling). High and Highest: one or two levels finer again, sharper in the\n"
+                                  "distance, with more shimmer unless super sampling is on.");
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Hardware renderer: the 3D drawn at 2 to 8 times the original resolution, with\n"
+                                "sharper textures; the window shows it scaled to fit, which smooths the edges.\n"
+                                "Match window draws at the window's own resolution (Retina, 4K, 5K).");
+            static const char *scalings[] = {"Smooth", "Sharp pixels", "Integer scaling"};
+            static const char *scaling_ids[] = {"", "sharp", "integer"};
+            int sc = 0;
+            for (int i = 0; i < 3; i++)
+                if (cfg_.scaling == scaling_ids[i]) sc = i;
+            ImGui::SetNextItemWidth(200);
+            if (ImGui::Combo("Scaling", &sc, scalings, 3)) {
+                cfg_.scaling = scaling_ids[sc];
+                cfg_.save();
+            }
+            ImGui::SetItemTooltip("How the game's picture is enlarged to the window. Smooth: filtered.\n"
+                                  "Sharp pixels: every original pixel a crisp block. Integer scaling: sharp, at\n"
+                                  "whole multiples only, so every pixel is the same size (a border remains).");
+            static const char *crts[] = {"Off", "Arcade monitor (slot mask)", "Aperture grille", "Shadow mask",
+                                         "Scanlines only"};
+            ImGui::BeginDisabled(!crt_error_.empty());
+            ImGui::SetNextItemWidth(200);
+            int crt = crt_error_.empty() ? std::clamp(cfg_.crt, 0, 4) : 0;
+            if (ImGui::Combo("CRT effect", &crt, crts, 5)) {
+                cfg_.crt = crt;
                 cfg_.save();
             }
             ImGui::EndDisabled();
-            ImGui::TextDisabled("Hardware renderer: the 3D drawn at 2 to 4 times the original resolution, with\n"
-                                "sharper textures; the window shows it scaled to fit, which smooths the edges.");
+            if (!crt_error_.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(unavailable: %s)", crt_error_.c_str());
+            }
+            ImGui::SetItemTooltip("The picture as an arcade monitor shows it: scanlines whose beams widen on bright\n"
+                                  "colours, the tube's phosphors, the glow of its glass and its curved screen.\n"
+                                  "Best at a large size (fullscreen); replaces Scaling. Both renderers.");
+            if (cfg_.crt && crt_error_.empty()) {
+                ImGui::Indent();
+                auto slider = [&](const char *label, float &value, float max, const char *tip) {
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::SliderFloat(label, &value, 0.0f, max, "%.2f", ImGuiSliderFlags_AlwaysClamp)) cfg_.save();
+                    ImGui::SetItemTooltip("%s", tip);
+                };
+                slider("Scanlines", cfg_.crt_scanlines, 1.0f, "0: a flat picture; 1: every line a separate beam.");
+                ImGui::BeginDisabled(cfg_.crt == 4);
+                slider("Phosphor mask", cfg_.crt_mask, 1.0f, "How dark the gaps between the phosphors are.");
+                ImGui::EndDisabled();
+                slider("Glow", cfg_.crt_glow, 1.0f, "Light scattered in the glass around bright parts.");
+                slider("Curvature", cfg_.crt_curvature, 0.25f, "0: a flat screen; more: a rounder tube.");
+                if (ImGui::Button("Defaults")) {
+                    const Config defaults;
+                    cfg_.crt_scanlines = defaults.crt_scanlines;
+                    cfg_.crt_mask = defaults.crt_mask;
+                    cfg_.crt_glow = defaults.crt_glow;
+                    cfg_.crt_curvature = defaults.crt_curvature;
+                    cfg_.save();
+                }
+                ImGui::Unindent();
+            }
+            {   // monitor calibration (runtime/calibration.h): MAME's conversion, a preset, or custom
+                struct Preset { const char *name; int black, white; float gamma; };
+                static const Preset presets[] = {
+                    {"MAME (original)", 64, 255, 1.0f},
+                    {"Arcade monitor", Config::kArcadeBlack, Config::kArcadeWhite, Config::kArcadeGamma},
+                };
+                int preset = 2; // custom
+                for (int i = 0; i < 2; i++)
+                    if (cfg_.cal_black == presets[i].black && cfg_.cal_white == presets[i].white &&
+                        cfg_.cal_gamma == presets[i].gamma)
+                        preset = i;
+                static const char *names[] = {presets[0].name, presets[1].name, "Custom"};
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::Combo("Colours", &preset, names, 3) && preset < 2) {
+                    cfg_.cal_black = presets[preset].black;
+                    cfg_.cal_white = presets[preset].white;
+                    cfg_.cal_gamma = presets[preset].gamma;
+                    cfg_.save();
+                }
+                ImGui::SetItemTooltip("How the board's colour output becomes the picture. MAME (original): MAME's\n"
+                                      "conversion, an approximation. Arcade monitor: deeper blacks and richer\n"
+                                      "colours, as a cabinet's monitor set up by its operator. Custom: the sliders.");
+                ImGui::Indent();
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::SliderInt("Black level", &cfg_.cal_black, 0, 160, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+                    cfg_.cal_white = std::max(cfg_.cal_white, cfg_.cal_black + 32);
+                    cfg_.save();
+                }
+                ImGui::SetItemTooltip("The darkest output shown as black (MAME: 64). Higher: dark greys, such as\n"
+                                      "the tyres, become black.");
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::SliderInt("White level", &cfg_.cal_white, 128, 255, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+                    cfg_.cal_black = std::min(cfg_.cal_black, cfg_.cal_white - 32);
+                    cfg_.save();
+                }
+                ImGui::SetItemTooltip("The output shown as full white (MAME: 255). Lower: more contrast, the\n"
+                                      "brightest colours saturate.");
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::SliderFloat("Gamma", &cfg_.cal_gamma, 0.6f, 1.8f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+                    cfg_.save();
+                ImGui::SetItemTooltip("Mid tones (MAME: 1.00). Higher: darker mid tones and richer colours, as a\n"
+                                      "CRT's steeper response; lower: lighter.");
+                ImGui::Unindent();
+            }
 
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::TextUnformatted("Enhancements");
+            {   // custom player car (runtime/car_mod.h)
+                {
+                    std::lock_guard<std::mutex> g(dialog_mutex_);
+                    if (!car_dialog_result_.empty()) {
+                        cfg_.car_path = car_dialog_result_;
+                        car_dialog_result_.clear();
+                        cfg_.save();
+                    }
+                }
+                const bool rev_a = std::strcmp(M2_ROMSET, "daytona") == 0;
+                ImGui::BeginDisabled(!rev_a);
+                if (ImGui::Checkbox("Custom car", &cfg_.car_mod)) cfg_.save();
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::TextDisabled(rev_a ? "(your own model in place of the player's car)" : "(Revision A only)");
+                if (cfg_.car_mod && rev_a) {
+                    ImGui::Indent();
+                    if (std::strcmp(car_buf_, cfg_.car_path.c_str()) != 0 && !ImGui::IsAnyItemActive())
+                        std::snprintf(car_buf_, sizeof car_buf_, "%s", cfg_.car_path.c_str());
+                    ImGui::SetNextItemWidth(360);
+                    if (ImGui::InputText("##car", car_buf_, sizeof car_buf_, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                        cfg_.car_path = car_buf_;
+                        cfg_.save();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Browse...##car", ImVec2(90, 0)) && !car_dialog_pending_) {
+                        static const SDL_DialogFileFilter filters[] = {{"Custom car (m2car)", "m2car"}, {"All files", "*"}};
+                        car_dialog_pending_ = true;
+                        SDL_ShowOpenFileDialog(car_dialog_done, this, window_, filters, 2,
+                                               cfg_.car_path.empty() ? nullptr : cfg_.car_path.c_str(), false);
+                    }
+                    static const char *wheel_modes[] = {"Its own wheels", "The game's wheels"};
+                    int wm = cfg_.car_own_wheels ? 0 : 1;
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::Combo("Wheels", &wm, wheel_modes, 2)) {
+                        cfg_.car_own_wheels = wm == 0;
+                        cfg_.save();
+                    }
+                    ImGui::SetItemTooltip("Either way they turn and steer as the game's, under the car's own wheel\n"
+                                          "arches; the game's are scaled to the car's wheels.");
+                    ImGui::TextDisabled("%s", car_status_.c_str());
+                    ImGui::TextDisabled("Make a .m2car from an OBJ with scripts/make_car_mod.py. The game itself\n"
+                                        "(handling, collisions) is unchanged.");
+                    ImGui::Unindent();
+                }
+            }
             static const char *aspects[] = {"Original (4:3)", "16:10", "16:9", "21:9"};
             static const char *aspect_ids[] = {"", "16:10", "16:9", "21:9"};
             int aspect = 0;

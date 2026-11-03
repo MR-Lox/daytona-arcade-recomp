@@ -3,11 +3,19 @@
 // m2run, whose dumps come from the software renderer: compare the two.
 //
 //   m2gpushot IMAGES_DIR FRAMES --dump DIR --every N [--inputs scripts/inputs/X.txt]
-//             [--aspect W:H [--hud-edges] [--stretch-backdrop]] [--scale N] [--nvram DIR] [--dump-from FRAME]
+//             [--aspect W:H [--hud-edges] [--stretch-backdrop]] [--scale N] [--texture-detail N] [--crt MODE [--crt-height PX]]
+//             [--calibration BLACK,WHITE,GAMMA] [--car FILE.m2car [--own-wheels]]
+//             [--nvram DIR] [--dump-from FRAME]
 //             [--draw-distance N] [--draw-budget N] [--scenery-log FILE] [--original-selection]
-//   m2gpushot IMAGES_DIR FRAMES --bench [--inputs ...] [--aspect ...] [--scale N]
+//   m2gpushot IMAGES_DIR FRAMES --bench [--inputs ...] [--aspect ...] [--scale N] [--crt MODE ...]
 //
-// --scale N: the internal resolution enhancement (1-4); dumps are N times
+// --calibration: the monitor calibration (runtime/calibration.h; MAME's is
+// 64,255,1).
+// --car: a custom player car (runtime/car_mod.h); --own-wheels: its own wheels.
+// --crt MODE: the frame through the CRT filter (1 slot mask, 2 aperture
+// grille, 3 shadow mask, 4 scanlines only), drawn PX tall (default 1440) at
+// the picture's shape; dumps are that size (the width is printed).
+// --scale N: the internal resolution enhancement (1-8); dumps are N times
 // wider and taller. --nvram DIR: start from the game's saved settings EEPROM
 // and backup RAM (ioboard_eeprom.bin, backup_ram.bin, as the app saves them
 // in its data folder), e.g. a cabinet type set in test mode.
@@ -18,7 +26,9 @@
 //
 // SDL_GPU without a window: an offscreen texture is drawn and read back.
 
+#include "app/gpu/crt.h"
 #include "app/gpu/gpu_renderer.h"
+#include "runtime/car_mod.h"
 #include "runtime/game_loop.h"
 #include "../common/input_script.h"
 #include "../common/nvram.h"
@@ -44,7 +54,10 @@ int main(int argc, char **argv) {
     std::string dump_dir, inputs_path, nvram_dir, scenery_log_path;
     uint32_t draw_budget = 0;
     uint64_t every = 0, dump_from = 0;
-    int scale = 1;
+    int crt_mode = 0, crt_height = 1440;
+    std::string car_path;
+    bool own_wheels = false;
+    int scale = 1, texture_detail = 0; // --texture-detail 0-2: textures that many mip levels finer
     double aspect = 0;
     bool hud_edges = false, stretch = false, bench = false, original_selection = false;
     for (int i = 3; i < argc; i++) {
@@ -56,10 +69,12 @@ int main(int argc, char **argv) {
         if (!std::strcmp(argv[i], "--hud-edges")) hud_edges = true;
         if (!std::strcmp(argv[i], "--stretch-backdrop")) stretch = true;
         if (!std::strcmp(argv[i], "--original-selection")) original_selection = true;
+        if (!std::strcmp(argv[i], "--own-wheels")) own_wheels = true;
     }
     for (int i = 3; i + 1 < argc; i += 2) {
         if (!std::strcmp(argv[i], "--hud-edges") || !std::strcmp(argv[i], "--stretch-backdrop") ||
-            !std::strcmp(argv[i], "--bench") || !std::strcmp(argv[i], "--original-selection")) { i--; continue; }
+            !std::strcmp(argv[i], "--bench") || !std::strcmp(argv[i], "--original-selection") ||
+            !std::strcmp(argv[i], "--own-wheels")) { i--; continue; }
         if (!std::strcmp(argv[i], "--aspect")) {
             double a = 0, b = 0;
             if (std::sscanf(argv[i + 1], "%lf:%lf", &a, &b) == 2 && b > 0) aspect = a / b;
@@ -69,7 +84,19 @@ int main(int argc, char **argv) {
         else if (!std::strcmp(argv[i], "--dump-from")) dump_from = std::strtoull(argv[i + 1], nullptr, 10);
         else if (!std::strcmp(argv[i], "--inputs")) inputs_path = argv[i + 1];
         else if (!std::strcmp(argv[i], "--nvram")) nvram_dir = argv[i + 1];
-        else if (!std::strcmp(argv[i], "--scale")) scale = std::clamp(std::atoi(argv[i + 1]), 1, 4);
+        else if (!std::strcmp(argv[i], "--scale")) scale = std::clamp(std::atoi(argv[i + 1]), 1, app::GpuRenderer::kMaxScale);
+        else if (!std::strcmp(argv[i], "--calibration")) {
+            rt::Calibration c;
+            if (std::sscanf(argv[i + 1], "%d,%d,%f", &c.black, &c.white, &c.gamma) != 3) {
+                std::fprintf(stderr, "m2gpushot: --calibration needs BLACK,WHITE,GAMMA\n");
+                return 2;
+            }
+            rt::set_calibration(c);
+        }
+        else if (!std::strcmp(argv[i], "--car")) car_path = argv[i + 1];
+        else if (!std::strcmp(argv[i], "--crt")) crt_mode = std::clamp(std::atoi(argv[i + 1]), 0, 4);
+        else if (!std::strcmp(argv[i], "--crt-height")) crt_height = std::clamp(std::atoi(argv[i + 1]), 384, 4320);
+        else if (!std::strcmp(argv[i], "--texture-detail")) texture_detail = std::clamp(std::atoi(argv[i + 1]), 0, 2);
         else if (!std::strcmp(argv[i], "--draw-distance")) rt::GameLoop::set_draw_distance(std::atoi(argv[i + 1]));
         else if (!std::strcmp(argv[i], "--scenery-log")) scenery_log_path = argv[i + 1];
         else if (!std::strcmp(argv[i], "--draw-budget")) {
@@ -82,6 +109,16 @@ int main(int argc, char **argv) {
     if (!bench && (dump_dir.empty() || !every)) {
         std::fprintf(stderr, "m2gpushot: --dump DIR and --every N (or --bench) are needed\n");
         return 2;
+    }
+    if (!car_path.empty()) {
+        std::string error;
+        auto car = rt::CarMod::load(car_path, &error);
+        if (!car) {
+            std::fprintf(stderr, "m2gpushot: %s\n", error.c_str());
+            return 1;
+        }
+        car->own_wheels = own_wheels;
+        rt::set_car_mod(car);
     }
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "m2gpushot: SDL_Init: %s\n", SDL_GetError());
@@ -111,9 +148,24 @@ int main(int argc, char **argv) {
     ti.layer_count_or_depth = 1;
     ti.num_levels = 1;
     SDL_GPUTexture *target = SDL_CreateGPUTexture(dev, &ti);
+    // the CRT filter's output, the dumped image when --crt
+    app::CrtFilter crt;
+    SDL_GPUTexture *crt_target = nullptr;
+    const int CW = crt_mode ? W * crt_height / H : SW, CH = crt_mode ? crt_height : SH;
+    if (crt_mode) {
+        if (!crt.init(dev, SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM)) {
+            std::fprintf(stderr, "m2gpushot: %s\n", crt.error().c_str());
+            return 1;
+        }
+        SDL_GPUTextureCreateInfo ci = ti;
+        ci.width = Uint32(CW);
+        ci.height = Uint32(CH);
+        crt_target = SDL_CreateGPUTexture(dev, &ci);
+        std::printf("m2gpushot: CRT dumps %dx%d\n", CW, CH);
+    }
     SDL_GPUTransferBufferCreateInfo tbi{};
     tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-    tbi.size = Uint32(SW) * Uint32(SH) * 4;
+    tbi.size = Uint32(CW) * Uint32(CH) * 4;
     SDL_GPUTransferBuffer *download = SDL_CreateGPUTransferBuffer(dev, &tbi);
     if (!target || !download) {
         std::fprintf(stderr, "m2gpushot: %s\n", SDL_GetError());
@@ -160,7 +212,9 @@ int main(int argc, char **argv) {
                 }
                 const auto c = clk::now();
                 SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(dev);
-                gpu.render(cmd, target, W, H, game.board().video(), scale);
+                gpu.render(cmd, target, W, H, game.board().video(), scale, texture_detail);
+                if (crt_mode)
+                    crt.draw(cmd, target, 0, Uint32(SW), Uint32(SH), W, H, crt_target, SDL_Rect{0, 0, CW, CH}, {});
                 last = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
                 const auto d = clk::now();
                 t_game += std::chrono::duration<double>(b - a).count();
@@ -186,16 +240,21 @@ int main(int argc, char **argv) {
             if (game.board().frame() >= dump_from) scenery_log.write(game);
             if (game.board().frame() < dump_from || game.board().frame() % every) continue;
             SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(dev);
-            gpu.render(cmd, target, W, H, game.board().video(), scale);
+            gpu.render(cmd, target, W, H, game.board().video(), scale, texture_detail);
+            if (crt_mode) {
+                app::CrtFilter::Params params; // the launcher's defaults
+                params.mask = crt_mode == 4 ? 0 : crt_mode == 1 ? 2 : crt_mode == 2 ? 1 : 3;
+                crt.draw(cmd, target, 0, Uint32(SW), Uint32(SH), W, H, crt_target, SDL_Rect{0, 0, CW, CH}, params);
+            }
             SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
             SDL_GPUTextureRegion src{};
-            src.texture = target;
-            src.w = Uint32(SW);
-            src.h = Uint32(SH);
+            src.texture = crt_mode ? crt_target : target;
+            src.w = Uint32(CW);
+            src.h = Uint32(CH);
             src.d = 1;
             SDL_GPUTextureTransferInfo dst{};
             dst.transfer_buffer = download;
-            dst.pixels_per_row = Uint32(SW);
+            dst.pixels_per_row = Uint32(CW);
             SDL_DownloadFromGPUTexture(copy, &src, &dst);
             SDL_EndGPUCopyPass(copy);
             SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
@@ -205,7 +264,7 @@ int main(int argc, char **argv) {
             std::snprintf(path, sizeof path, "%s/run_%05" PRIu64 ".rgb", dump_dir.c_str(), game.board().frame());
             if (FILE *d = std::fopen(path, "wb")) {
                 const void *p = SDL_MapGPUTransferBuffer(dev, download, false);
-                std::fwrite(p, 4, size_t(SW) * size_t(SH), d);
+                std::fwrite(p, 4, size_t(CW) * size_t(CH), d);
                 SDL_UnmapGPUTransferBuffer(dev, download);
                 std::fclose(d);
             }
@@ -216,6 +275,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     gpu.shutdown();
+    crt.shutdown();
+    if (crt_target) SDL_ReleaseGPUTexture(dev, crt_target);
     SDL_ReleaseGPUTransferBuffer(dev, download);
     SDL_ReleaseGPUTexture(dev, target);
     SDL_DestroyGPUDevice(dev);

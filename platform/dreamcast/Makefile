@@ -81,7 +81,7 @@ GEN_FLAGS := $(subst -O2,-Os,$(CXXFLAGS)) $(GAME_DEFS) -Wno-unused-label
 
 RUNTIME := cpu tgp m2_tgp_board geo raster video m2_board game_loop zip rom_import archive m2_replay_bus \
            lockstep snd_cpu multipcm sound_board native_sample_mixer native_sound_sequencer native_sound_engine \
-           enhance comm_board
+           enhance comm_board calibration car_mod
 # SoftFloat's file list, from the main tree's CMake list.
 SOFTFLOAT_SRC := $(shell sed -n 's|.*$${SOFTFLOAT_DIR}/source/\(.*\.c\).*|\1|p' $(ROOT)/cmake/softfloat_sources.cmake)
 # The i960 code: scripts/fast_gen.py's rewrite of the desktop's (fewer

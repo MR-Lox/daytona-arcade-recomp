@@ -13,6 +13,7 @@
 #pragma once
 
 #include "runtime/fast_paths.h"
+#include "runtime/car_mod.h"
 #include "runtime/rom_source.h"
 
 #include <cstdint>
@@ -42,6 +43,9 @@ struct GeoPoly {
     uint8_t window = 0;
     uint32_t reverse = 0;
     uint8_t num_vertices = 0;
+    // A custom car's polygon (runtime/car_mod.h): 0x8000 | its own RGB555
+    // colour, used where the solid renderer reads the palette; 0 for the game's.
+    uint16_t direct_color = 0;
 #ifdef M2_FAST_GEO
     // Not zero-filled for every polygon kept (160 bytes): only
     // v[0..num_vertices) is ever read, and model2_3d_process_polygon writes
@@ -162,6 +166,33 @@ public:
     // read_start (the geometrizer's read-start register).
     void parse(uint32_t read_start);
 
+    // Model capture (tools/m2modeldump; off unless set): every object the
+    // display list draws, with its matrix, and every polygon it hands the
+    // rasterizer before culling and clipping, in view space (after the
+    // matrix and focus) with its raw texture coordinates and header. Nothing
+    // the game sees changes.
+    struct CaptureObject {
+        uint32_t address, count, tpa, tha, mode, window;
+        float matrix[12]; // as geo_state's: rotation (columns 0-8), translation 9-11
+        float focus[2];
+    };
+    struct CapturePoly {
+        int32_t object;     // index into objects
+        uint32_t attr;      // the link's attributes (quad bit 0, link type 8-9, double sided 17)
+        uint8_t num_vertices;
+        bool backface;      // the rasterizer's back-face bit
+        uint8_t luma;
+        float view[4][3];   // x, y (focus applied), z
+        uint16_t uv[4][2];  // pu, pv as read
+        uint16_t texheader[4];
+    };
+    struct Capture {
+        std::vector<CaptureObject> objects;
+        std::vector<CapturePoly> polys;
+        int32_t current = -1; // the object being parsed, -1 outside one
+    };
+    Capture *capture = nullptr;
+
     // This frame's output.
     std::vector<GeoPoly> polys;       // kept polygons, in the order added
     std::vector<uint32_t> pushed;     // every word handed to the rasterizer
@@ -241,6 +272,14 @@ private:
     uint16_t float_to_zval(float floatval, int32_t z_adjust);
     bool check_culling(raster_state *raster, uint32_t attr, float min_z, float max_z);
     template <unsigned NumVerts> void model2_3d_process_polygon(raster_state *raster, uint32_t attr);
+    // The custom player car (runtime/car_mod.h): true if it drew or hid this
+    // object (the body, its parts, the wheels moved under it).
+    bool draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t count);
+    void emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, const float *matrix, uint32_t attr,
+                       const float offset[3]);
+    void parse_object(geo_state *geo, GeoPtr input, uint32_t count);
+    float car_body_[12] = {};   // the custom car's body matrix this frame
+    bool car_body_valid_ = false;
     void model2_3d_push(raster_state *raster, uint32_t input);
     void model2_3d_push_point(raster_state *raster, const GeoVertex &point);
     void render_frame_start();

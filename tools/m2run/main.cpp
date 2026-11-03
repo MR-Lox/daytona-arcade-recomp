@@ -7,7 +7,9 @@
 //         [--dump-from FRAME] [--native-audio-check] [--nvram DIR] [--save-nvram DIR]
 //         [--link-listen PORT --link-next HOST:PORT [--link-sync]]
 //         [--draw-budget N] [--draw-order-only] [--original-selection] [--scenery-log FILE]
+//         [--car FILE.m2car [--own-wheels]]
 //
+// --car: a custom player car (runtime/car_mod.h), --own-wheels with its wheels.
 // --draw-budget is an override independent of --draw-distance:
 // 0 uses Automatic; e.g. --draw-distance 1 --draw-budget 5000 widens
 // cell selection while retaining the original budget. The launcher exposes
@@ -36,6 +38,7 @@
 // waits for the display's vsync at that point; the frame rate is the only
 // limit.
 
+#include "runtime/car_mod.h"
 #include "runtime/game_loop.h"
 #include "../common/input_script.h"
 #include "runtime/native_sound_engine.h"
@@ -102,7 +105,8 @@ int main(int argc, char **argv) {
     uint64_t every = 0, dump_from = 0;
     double aspect = 0;
     int frame_skip = 0;
-    bool hud_edges = false, stretch_backdrop = false, original_selection = false;
+    bool hud_edges = false, stretch_backdrop = false, original_selection = false, own_wheels = false;
+    std::string car_path;
     uint32_t draw_budget = 0;
     for (int i = 3; i < argc; i++) {
         if (!std::strcmp(argv[i], "--draw-budget") && i + 1 == argc) {
@@ -115,12 +119,15 @@ int main(int argc, char **argv) {
         if (!std::strcmp(argv[i], "--native-audio-check")) native_check = true;
         if (!std::strcmp(argv[i], "--draw-order-only")) rt::EnhanceDiagnostics::draw_order_only = true;
         if (!std::strcmp(argv[i], "--original-selection")) original_selection = true;
+        if (!std::strcmp(argv[i], "--own-wheels")) own_wheels = true;
     }
     for (int i = 3; i + 1 < argc; i += 2) {
         if (!std::strcmp(argv[i], "--hud-edges") || !std::strcmp(argv[i], "--stretch-backdrop") ||
             !std::strcmp(argv[i], "--link-sync") || !std::strcmp(argv[i], "--native-audio-check") ||
-            !std::strcmp(argv[i], "--draw-order-only") || !std::strcmp(argv[i], "--original-selection")) { i--; continue; }
+            !std::strcmp(argv[i], "--draw-order-only") || !std::strcmp(argv[i], "--original-selection") ||
+            !std::strcmp(argv[i], "--own-wheels")) { i--; continue; }
         if (!std::strcmp(argv[i], "--inputs")) inputs_path = argv[i + 1];
+        else if (!std::strcmp(argv[i], "--car")) car_path = argv[i + 1];
         else if (!std::strcmp(argv[i], "--dump")) dump_dir = argv[i + 1];
         else if (!std::strcmp(argv[i], "--every")) every = std::strtoull(argv[i + 1], nullptr, 10);
         else if (!std::strcmp(argv[i], "--dump-from")) dump_from = std::strtoull(argv[i + 1], nullptr, 10);
@@ -142,6 +149,16 @@ int main(int argc, char **argv) {
             double w = 0, h = 0;
             if (std::sscanf(argv[i + 1], "%lf:%lf", &w, &h) == 2 && h > 0) aspect = w / h;
         }
+    }
+    if (!car_path.empty()) {
+        std::string error;
+        auto car = rt::CarMod::load(car_path, &error);
+        if (!car) {
+            std::fprintf(stderr, "m2run: %s\n", error.c_str());
+            return 1;
+        }
+        car->own_wheels = own_wheels;
+        rt::set_car_mod(car);
     }
 
     try {

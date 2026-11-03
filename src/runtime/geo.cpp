@@ -432,6 +432,39 @@ void Geo::model2_3d_process_polygon(raster_state *raster, uint32_t attr)
 	object.texlod += raster->log_ram[raster->command_buffer[10] & 0x7fff];
 #endif
 
+	if (capture && capture->current >= 0) // tools/m2modeldump: the polygon as the object gave it
+	{
+		CapturePoly c{};
+		c.object = capture->current;
+		c.attr = attr;
+		c.num_vertices = uint8_t(NumVerts);
+		c.backface = (raster->command_buffer[9] & 0x00800000) != 0;
+		c.luma = object.luma;
+#ifdef M2_FAST_GEO
+		GeoPtr16 tpc = tp, thc = th; // (their reads, again: tp and th still point there)
+#endif
+		for (uint32_t k = 0; k < NumVerts; k++)
+		{
+			c.view[k][0] = object.v[k].x;
+			c.view[k][1] = object.v[k].y;
+			c.view[k][2] = object.v[k].pz;
+#ifdef M2_FAST_GEO
+			c.uv[k][1] = *tpc++; // pv first, as above
+			c.uv[k][0] = *tpc++;
+#else
+			c.uv[k][0] = uint16_t(object.v[k].pu);
+			c.uv[k][1] = uint16_t(object.v[k].pv);
+#endif
+		}
+		for (int k = 0; k < 4; k++)
+#ifdef M2_FAST_GEO
+			c.texheader[k] = *thc++;
+#else
+			c.texheader[k] = object.texheader[k];
+#endif
+		capture->polys.push_back(c);
+	}
+
 	/* determine whether we can cull this polygon */
 	cull = check_culling(raster,attr,min_z,max_z);
 
@@ -591,6 +624,7 @@ void Geo::render_frame_start()
 
 	/* reset the polygon list index */
 	raster->poly_list_index = 0;
+	car_body_valid_ = false;
 	polys.clear();
 	pushed.clear();
 
@@ -1631,6 +1665,24 @@ GeoPtr Geo::geo_object_data(geo_state *geo, uint32_t opcode, GeoPtr input)
 	if (obc == 0)
 		obc = 0xfffff;
 
+	if (capture) // tools/m2modeldump
+	{
+		CaptureObject c{oba, obc, tpa, tha, geo->mode, raster->cur_window, {}, {geo->focus.x, geo->focus.y}};
+		std::copy(geo->matrix, geo->matrix + 12, c.matrix);
+		capture->current = int32_t(capture->objects.size());
+		capture->objects.push_back(c);
+	}
+
+	if (!car_mod() || !draw_car_mod(geo, oba, obp, obc)) // a custom player car (runtime/car_mod.h)
+		parse_object(geo, obp, obc);
+	if (capture) capture->current = -1;
+
+	/* move by 4 parameters */
+	return input;
+}
+
+void Geo::parse_object(geo_state *geo, GeoPtr obp, uint32_t obc)
+{
 	switch (geo->mode & 3)
 	{
 		/* Normals present, No Specular */
@@ -1645,9 +1697,170 @@ GeoPtr Geo::geo_object_data(geo_state *geo, uint32_t opcode, GeoPtr input)
 		/* No Normals present, Specular */
 		case 3: geo_parse_nn_s(geo, obp, obc); break;
 	}
+}
 
-	/* move by 4 parameters */
-	return input;
+/* Custom player car (runtime/car_mod.h). The player car's objects in the
+   polygon ROM (Revision A; tools/m2modeldump on a race): its body, a part
+   drawn with it, and the right and left wheels (each drawn front and back),
+   whose models are an axle along x through (+-kWheelHub, 0, 0), 0.692 across;
+   drawn at the body's place, its shadow (a flat 2 x 4.85 m plane) and its
+   rear window's reflection (from polygon RAM). */
+namespace {
+constexpr uint32_t kCarBody = 0x0095ff9d, kCarBodyPart = 0x00961bbf, kCarShadow = 0x008d7ab7, kCarReflection = 0x00000004;
+constexpr float kShadowWidth = 2.0f, kShadowLength = 4.85f;
+constexpr uint32_t kWheelRight = 0x008d7c9a, kWheelLeft = 0x008d7b13;
+constexpr float kWheelHub = 0.1995f, kWheelRadius = 0.346f;
+}
+
+bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t count)
+{
+	const CarMod *mod = car_mod().get();
+#ifdef M2_ROMSET
+	if (std::strcmp(M2_ROMSET, "daytona") != 0) return false; // the addresses are Revision A's
+#else
+	return false;
+#endif
+	raster_state *raster = geo->raster;
+	// the rasterizer's end of an object, as after a parse: two points, then attribute 0
+	auto end_object = [&] { for (int i = 0; i < 7; i++) model2_3d_push(raster, 0); };
+	const float none[3] = {0, 0, 0};
+	if (address == kCarBody)
+	{
+		std::copy(geo->matrix, geo->matrix + 12, car_body_);
+		car_body_valid_ = true;
+		GeoPtr first = input;
+		first += 6; // past the two opening points: the first link's attributes (lighting parameters)
+		emit_car_tris(geo, mod->body, geo->matrix, *first, none);
+		end_object();
+		return true;
+	}
+	if (address == kCarBodyPart)
+	{
+		end_object();
+		return true;
+	}
+	// drawn where the body is: its shadow (scaled to the custom car) and the window reflection (hidden)
+	const bool at_body = car_body_valid_ && std::fabs(geo->matrix[9] - car_body_[9]) < 1e-3f &&
+	                     std::fabs(geo->matrix[10] - car_body_[10]) < 1e-3f && std::fabs(geo->matrix[11] - car_body_[11]) < 1e-3f;
+	if (at_body && address == kCarReflection)
+	{
+		end_object();
+		return true;
+	}
+	if (at_body && address == kCarShadow)
+	{
+		float saved[12];
+		std::copy(geo->matrix, geo->matrix + 12, saved);
+		const float sx = (mod->hi[0] - mod->lo[0]) / kShadowWidth, sz = (mod->hi[2] - mod->lo[2]) / kShadowLength;
+		for (int i = 0; i < 3; i++) geo->matrix[i] *= sx, geo->matrix[6 + i] *= sz;
+		parse_object(geo, input, count);
+		std::copy(saved, saved + 12, geo->matrix);
+		return true;
+	}
+	const bool right = address == kWheelRight;
+	if ((!right && address != kWheelLeft) || !car_body_valid_ || count == 0) return false;
+
+	// the wheel's centre now, in the body's space (its matrix a rotation): which corner it is
+	const float *m = geo->matrix, *b = car_body_;
+	const float hub = right ? kWheelHub : -kWheelHub;
+	const float d[3] = {m[9] + hub * m[0] - b[9], m[10] + hub * m[1] - b[10], m[11] + hub * m[2] - b[11]};
+	const float o[3] = {d[0] * b[0] + d[1] * b[1] + d[2] * b[2], d[0] * b[3] + d[1] * b[4] + d[2] * b[5],
+	                    d[0] * b[6] + d[1] * b[7] + d[2] * b[8]};
+	if (o[0] * o[0] + o[1] * o[1] + o[2] * o[2] > 16.0f) return false; // not under the player's car
+	const int corner = (o[2] > 0 ? CarMod::FL : CarMod::RL) + (o[0] > 0 ? 1 : 0);
+	const auto &w = mod->wheels[corner];
+	const float at[3] = {b[9] + w[0] * b[0] + w[1] * b[3] + w[2] * b[6], b[10] + w[0] * b[1] + w[1] * b[4] + w[2] * b[7],
+	                     b[11] + w[0] * b[2] + w[1] * b[5] + w[2] * b[8]}; // the custom wheel's centre, view space
+
+	float saved[12];
+	std::copy(geo->matrix, geo->matrix + 12, saved);
+	if (mod->own_wheels && !mod->wheel_meshes[corner].empty())
+	{
+		// its own wheel, turning with the game's: body space about its centre, in the wheel's axes
+		float matrix[12];
+		std::copy(saved, saved + 12, matrix);
+		for (int i = 0; i < 3; i++) matrix[9 + i] = at[i] - hub * saved[i];
+		const float offset[3] = {hub - w[0], -w[1], -w[2]};
+		GeoPtr first = input;
+		first += 6;
+		emit_car_tris(geo, mod->wheel_meshes[corner], matrix, *first, offset);
+		end_object();
+		return true;
+	}
+	// the game's wheel, scaled to the custom one and centred on it; the light scaled back,
+	// as the normals are transformed by the scaled matrix
+	const float s = w[3] / kWheelRadius;
+	for (int i = 0; i < 9; i++) geo->matrix[i] = saved[i] * s;
+	for (int i = 0; i < 3; i++) geo->matrix[9 + i] = at[i] - s * hub * saved[i];
+	const GeoVertex light = geo->light;
+	geo->light.x /= s, geo->light.y /= s, geo->light.pz /= s;
+	parse_object(geo, input, count);
+	geo->light = light;
+	std::copy(saved, saved + 12, geo->matrix);
+	return true;
+}
+
+void Geo::emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, const float *matrix, uint32_t attr,
+                        const float offset[3])
+{
+	raster_state *raster = geo->raster;
+	float m[12];
+	std::copy(matrix, matrix + 12, m);
+	const texture_parameter *texparam = &geo->texture_parameters[(attr >> 18) & 0x1f];
+	for (const CarMod::Tri &t : tris)
+	{
+		// The game's normals face in: a polygon is its front when normal . point >= 0 (geo_parse_np_ns).
+		GeoVertex normal, v[3];
+		normal.x = -t.n[0], normal.y = -t.n[1], normal.pz = -t.n[2];
+		transform_vector(&normal, m);
+		for (int k = 0; k < 3; k++)
+		{
+			v[k].x = t.p[k][0] + offset[0];
+			v[k].y = t.p[k][1] + offset[1];
+			v[k].pz = t.p[k][2] + offset[2];
+			transform_point(&v[k], m);
+		}
+		const float dotp = dot_product(normal, v[0]);
+		if (dotp < 0) continue; // its back (not double sided: check_culling)
+		const float dotl = dot_product(normal, geo->light);
+		float luminance = dotl * dotp < 0 ? 0.0f : std::fabs(dotl);
+		luminance = std::clamp(luminance * texparam->diffuse + texparam->ambient, 0.0f, 255.0f);
+		for (GeoVertex &p : v) apply_focus(geo, &p);
+		const float min_z = std::min({v[0].pz, v[1].pz, v[2].pz}), max_z = std::max({v[0].pz, v[1].pz, v[2].pz});
+		if (max_z < 0) continue;
+		if (raster->master_z_clip != 0xff && (int32_t)(1.0 / min_z) > raster->master_z_clip) continue;
+
+		// clipped and added as model2_3d_process_polygon adds the game's (z sort: the minimum z)
+		GeoVertex vertices[2][8];
+		GeoVertex *verts_in = vertices[0], *verts_out = vertices[1];
+		for (int k = 0; k < 3; k++) verts_in[k] = v[k];
+		int32_t clipped_verts = 3;
+		for (int i = 0; i < 4 && clipped_verts; i++)
+		{
+			const auto &clip_plane = raster->clip_plane[raster->center_sel][i];
+			if (polygon_inside_plane(verts_in, clipped_verts, clip_plane)) continue;
+			clipped_verts = clip_polygon(verts_in, clipped_verts, verts_out, clip_plane);
+			std::swap(verts_in, verts_out);
+		}
+		raster->polygon_z = min_z;
+		if (clipped_verts <= 2) continue;
+		if (++raster->poly_list_index >= 32768) throw GeoFatal("SEGA 3D: Max polygon limit exceeded");
+		GeoPoly *poly = &polys.emplace_back();
+		poly->reverse = raster->reverse;
+		poly->z = float_to_zval(min_z, raster->z_adjust);
+		for (uint16_t &h : poly->texheader) h = 0; // the solid renderer
+		poly->luma = uint8_t(int32_t(luminance));
+		poly->texlod = 0;
+		poly->direct_color = uint16_t(0x8000 | t.color);
+		for (int i = 0; i < 4; i++) poly->viewport[i] = raster->viewport[i];
+		poly->center[0] = raster->center[raster->center_sel][0];
+		poly->center[1] = raster->center[raster->center_sel][1];
+		poly->window = raster->cur_window;
+		poly->num_vertices = uint8_t(clipped_verts);
+		for (int i = 0; i < clipped_verts; i++) poly->v[i] = verts_in[i];
+		if (poly->z < raster->min_z) raster->min_z = poly->z;
+		if (poly->z > raster->max_z) raster->max_z = poly->z;
+	}
 }
 
 /* Command 02: Direct Data */

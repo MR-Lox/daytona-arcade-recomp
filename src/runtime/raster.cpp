@@ -91,6 +91,7 @@ inline u16 le16(const uint8_t *base, u32 index) { return u16(base[index * 2] | b
 struct Raster::Extra {
     u8 checker = 0;
     u32 lumabase = 0, colorbase = 0;
+    u16 direct_color = 0; // GeoPoly::direct_color (a custom car)
     const u32 *texsheet[2] = {nullptr, nullptr};
     u32 texwidth = 0, texheight = 0, texx = 0, texy = 0;
     u8 texwrapx = 0, texwrapy = 0, texmirrorx = 0, texmirrory = 0, utex = 0, utexminlod = 0;
@@ -115,12 +116,10 @@ Raster::Raster() {
 #else
 Raster::Raster() : dest_(512 * 512), fill_(512 * 512) {
 #endif
-    // MAME video_start
-    for (int i = 0; i < 256; i++) {
-        double raw_value = std::max((double(i) - 64.0) * 255.0 / 191.0, 0.0);
-        gamma_[i] = u8(raw_value);
-    }
+    fill_gamma_table(gamma_, calibration()); // MAME video_start's, unless calibrated
 }
+
+void Raster::set_calibration(const Calibration &c) { fill_gamma_table(gamma_, c); }
 
 void Raster::set_wide_margin(int margin) {
     margin_ = std::max(margin, 0);
@@ -286,6 +285,7 @@ void Raster::render_one(GeoPoly poly, int crtc_x, int crtc_y, int render_x, int 
     extra.checker = (poly.texheader[0] >> 15) & 1;
     extra.lumabase = u32(poly.texheader[1] & 0xff) << 7;
     extra.colorbase = (poly.texheader[3] >> 6) & 0x3ff;
+    extra.direct_color = poly.direct_color;
     extra.luma = poly.luma;
     extra.texlod = poly.texlod;
 
@@ -517,7 +517,8 @@ void Raster::draw_scanline_solid(int32_t y, int32_t x0, int32_t x1, const float 
     u32 *const p = &dest_[size_t(y) * size_t(stride_)];
     u8 *const fill = &fill_[size_t(y) * size_t(stride_)];
     const u8 luma = o.luma >> 2;
-    const u32 color = le16(mem_->palram, o.colorbase + 0x1000) & 0xffff;
+    // the palette entry's colour, or a custom car's own (GeoPoly::direct_color)
+    const u32 color = o.direct_color ? o.direct_color & 0x7fffu : le16(mem_->palram, o.colorbase + 0x1000) & 0xffff;
     const u32 tr = gamma_[le16(mem_->colorxlat, 0x0000 / 2 + (((color >> 0) & 0x1f) << 8) + luma) & 0xff];
     const u32 tg = gamma_[le16(mem_->colorxlat, 0x4000 / 2 + (((color >> 5) & 0x1f) << 8) + luma) & 0xff];
     const u32 tb = gamma_[le16(mem_->colorxlat, 0x8000 / 2 + (((color >> 10) & 0x1f) << 8) + luma) & 0xff];

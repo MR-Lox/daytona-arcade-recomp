@@ -17,6 +17,7 @@
 // the colour translation from storage buffers.
 #pragma once
 
+#include "runtime/calibration.h"
 #include "runtime/video.h"
 
 #include <SDL3/SDL.h>
@@ -40,8 +41,11 @@ public:
     // front tilemap layers, all from `video` in external-3D mode. scale > 1
     // (the internal resolution enhancement): the 3D drawn at w x h times
     // scale, textures a mip level finer per doubling, the tilemaps' pixels
-    // repeated.
-    void render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, int w, int h, const rt::Video &video, int scale = 1);
+    // repeated. texture_detail (0-2): textures that many mip levels finer
+    // again, sharper in the distance than the game's own choice.
+    static constexpr int kMaxScale = 8;
+    void render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, int w, int h, const rt::Video &video, int scale = 1,
+                int texture_detail = 0);
 
 private:
     struct PolyVertex {
@@ -82,13 +86,14 @@ private:
     std::vector<Batch> batches_;
     std::vector<size_t> order_;
     uint8_t gamma_[256];
+    uint32_t calibration_generation_ = 0; // the monitor calibration gamma_ holds
     std::string error_;
 
     SDL_GPUShader *shader(const unsigned char *spv, size_t spv_len, const unsigned char *dxil, size_t dxil_len,
                           const char *msl, const char *dxil_entry, SDL_GPUShaderStage stage, int uniforms, int samplers,
                           int storage_buffers = 0);
     bool ensure(int w, int h, int scale, uint32_t vert_bytes);
-    void build(const rt::Video &video, int w, int h, int scale);
+    void build(const rt::Video &video, int w, int h, int scale, int texture_detail);
 };
 
 } // namespace app

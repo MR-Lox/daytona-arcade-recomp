@@ -41,7 +41,29 @@ struct Config {
     int draw_distance = 0;     // scenery: 0 = the game's own, -2..+2 (rt::Enhance)
     uint32_t draw_budget = 0;   // 0 Automatic; positive Custom allowance (runtime/scenery.h)
     int draw_mode = 0;         // 0 double buffered (every frame), 1 single buffered (every 2nd), 2 every third frame
-    int supersampling = 1;     // hardware renderer: drawn at 1 (off) to 4 times the original resolution
+    int supersampling = 1;     // hardware renderer: drawn at 1 (off) to kMaxSupersampling times the original resolution; 0 matches the window
+    static constexpr int kMaxSupersampling = 8;
+    int texture_detail = 0;    // hardware renderer: 0 the game's own mip levels, 1-2 that many levels finer
+    // The frame scaled to the window: "" smooth (bilinear), "sharp" (nearest),
+    // "integer" (nearest, whole multiples of the original pixels only).
+    std::string scaling;
+    // CRT filter (app/gpu/crt.h): 0 off; 1 slot mask (arcade monitor), 2 aperture
+    // grille, 3 shadow mask, 4 scanlines only. Its settings 0..1 (curvature 0..0.25).
+    int crt = 0;
+    float crt_scanlines = 0.9f, crt_mask = 0.35f, crt_glow = 0.12f, crt_curvature = 0.04f;
+    // Custom player car (runtime/car_mod.h; Revision A): a .m2car made by
+    // scripts/make_car_mod.py, with its own wheels or the game's under it.
+    bool car_mod = false;
+    std::string car_path;
+    bool car_own_wheels = true;
+    // Monitor calibration (runtime/calibration.h): the colour DAC's black and
+    // white points and a gamma. 64, 255, 1: MAME's conversion, the default.
+    int cal_black = 64, cal_white = 255;
+    float cal_gamma = 1.0f;
+    // The "Arcade monitor" preset: deeper blacks, a little more contrast and a
+    // CRT-like steeper mid tone response.
+    static constexpr int kArcadeBlack = 88, kArcadeWhite = 248;
+    static constexpr float kArcadeGamma = 1.2f;
     static constexpr double kMaxAspect = 21.0 / 9.0;
     double aspect_ratio() const; // width / height; 0 = original
     Controls controls;

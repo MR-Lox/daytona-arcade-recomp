@@ -51,8 +51,8 @@ SDL_GPUShader *GpuRenderer::shader(const unsigned char *spv, size_t spv_len, con
 
 bool GpuRenderer::init(SDL_GPUDevice *dev, SDL_GPUTextureFormat format) {
     dev_ = dev;
-    for (int i = 0; i < 256; i++) // the rasterizer's gamma (MAME video_start)
-        gamma_[i] = uint8_t(std::max((double(i) - 64.0) * 255.0 / 191.0, 0.0));
+    rt::fill_gamma_table(gamma_, rt::calibration()); // the rasterizer's (MAME video_start's, unless calibrated)
+    calibration_generation_ = rt::calibration_generation();
 
     SDL_GPUShader *vs_poly = shader(k_vs_poly_spv, sizeof k_vs_poly_spv, k_vs_poly_dxil, sizeof k_vs_poly_dxil,
                                     k_vs_poly_msl, "vs_poly", SDL_GPU_SHADERSTAGE_VERTEX, 1, 0);
@@ -243,7 +243,7 @@ bool GpuRenderer::ensure(int w, int h, int scale, uint32_t vert_bytes) {
 }
 
 // The polygons as triangles, in the rasterizer's order, batched by clip rectangle.
-void GpuRenderer::build(const rt::Video &video, int w, int h, int scale) {
+void GpuRenderer::build(const rt::Video &video, int w, int h, int scale, int texture_detail) {
     verts_.clear();
     batches_.clear();
     const std::vector<rt::GeoPoly> &polys = video.gpu_polys();
@@ -259,8 +259,9 @@ void GpuRenderer::build(const rt::Video &video, int w, int h, int scale) {
     const uint16_t hud_z = video.raster().hud_z();
     if (polys.empty() || !mem.palram || !mem.colorxlat) return;
     // internal resolution: the mip level the rasterizer picks from z, less
-    // log2(scale) (its levels are 128 units of fast_log2)
-    const int lod_bias = int(std::lround(128.0 * std::log2(double(scale))));
+    // log2(scale) (its levels are 128 units of fast_log2), and texture_detail
+    // levels more
+    const int lod_bias = int(std::lround(128.0 * std::log2(double(scale)))) + 128 * texture_detail;
 
     // Raster::render: windows from the last down to 0, low z first, newest first within z.
     order_.resize(polys.size());
@@ -307,7 +308,8 @@ void GpuRenderer::build(const rt::Video &video, int w, int h, int scale) {
         // colour: the solid renderer's (palette entry, luma translation, gamma)
         const uint32_t colorbase = (poly.texheader[3] >> 6) & 0x3ff;
         const uint32_t luma = poly.luma >> 2;
-        const uint32_t color = le16(mem.palram, colorbase + 0x1000);
+        const uint32_t color = poly.direct_color ? poly.direct_color & 0x7fffu // a custom car's own (GeoPoly)
+                                                 : le16(mem.palram, colorbase + 0x1000);
         const float r = gamma_[le16(mem.colorxlat, 0x0000 / 2 + (((color >> 0) & 0x1f) << 8) + luma) & 0xff] / 255.0f;
         const float g = gamma_[le16(mem.colorxlat, 0x4000 / 2 + (((color >> 5) & 0x1f) << 8) + luma) & 0xff] / 255.0f;
         const float b = gamma_[le16(mem.colorxlat, 0x8000 / 2 + (((color >> 10) & 0x1f) << 8) + luma) & 0xff] / 255.0f;
@@ -349,10 +351,14 @@ void GpuRenderer::build(const rt::Video &video, int w, int h, int scale) {
 }
 
 void GpuRenderer::render(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *target, int w, int h, const rt::Video &video,
-                         int scale) {
+                         int scale, int texture_detail) {
     if (!ok()) return;
-    scale = std::clamp(scale, 1, 4);
-    build(video, w, h, scale);
+    if (calibration_generation_ != rt::calibration_generation()) { // the launcher's monitor calibration changed
+        calibration_generation_ = rt::calibration_generation();
+        rt::fill_gamma_table(gamma_, rt::calibration());
+    }
+    scale = std::clamp(scale, 1, kMaxScale);
+    build(video, w, h, scale, std::clamp(texture_detail, 0, 2));
     const uint32_t vert_bytes = uint32_t(verts_.size() * sizeof(PolyVertex));
     if (!ensure(w, h, scale, vert_bytes)) return;
 

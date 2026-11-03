@@ -23,6 +23,7 @@ def main():
     subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + flags +
                    [str(ROOT / 'tests/test_vita_gpu_lifetime.cpp'),
                     str(ROOT / 'src/runtime/video.cpp'), str(ROOT / 'src/runtime/raster.cpp'),
+                    str(ROOT / 'src/runtime/calibration.cpp'), str(ROOT / 'src/runtime/car_mod.cpp'),
                     '-o', str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
 
