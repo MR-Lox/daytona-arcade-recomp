@@ -1702,14 +1702,51 @@ void Geo::parse_object(geo_state *geo, GeoPtr obp, uint32_t obc)
 /* Custom player car (runtime/car_mod.h). The player car's objects in the
    polygon ROM (Revision A; tools/m2modeldump on a race): its body, a part
    drawn with it, and the right and left wheels (each drawn front and back),
-   whose models are an axle along x through (+-kWheelHub, 0, 0), 0.692 across;
+   whose models are an axle along x through (+-hub, 0, 0), 0.692 across;
    drawn at the body's place, its shadow (a flat 2 x 4.85 m plane) and its
-   rear window's reflection (from polygon RAM). */
+   rear window's reflection (from polygon RAM). Car select draws the same body
+   with wheels of its own (more polygons, slightly smaller); the bonnet view, a
+   model of the bonnet and dashboard in the body's space. */
 namespace {
 constexpr uint32_t kCarBody = 0x0095ff9d, kCarBodyPart = 0x00961bbf, kCarShadow = 0x008d7ab7, kCarReflection = 0x00000004;
+constexpr uint32_t kCarBonnetView = 0x0094fff9;
+// how much nearer a decal sorts (a headlight's cross on its lens): the polygons are drawn
+// nearest first and none paints over another, so the part on top must sort first
+constexpr float kDecalBias = 0.06f;
 constexpr float kShadowWidth = 2.0f, kShadowLength = 4.85f;
-constexpr uint32_t kWheelRight = 0x008d7c9a, kWheelLeft = 0x008d7b13;
-constexpr float kWheelHub = 0.1995f, kWheelRadius = 0.346f;
+struct CarWheel {
+	uint32_t address;
+	bool right;
+	float hub, radius, width;
+	float scale; // drawn this much of the custom car's wheel size
+};
+// car select's are drawn smaller: up close, the game's wide tyres cut through the custom car's arches
+constexpr CarWheel kCarWheels[] = {
+	{0x008d7c9a, true, 0.1995f, 0.346f, 0.399f, 1.0f},  {0x008d7b13, false, 0.1995f, 0.346f, 0.399f, 1.0f},  // the race's
+	{0x008da8ca, true, 0.2005f, 0.335f, 0.401f, 0.85f}, {0x008d9ec9, false, 0.2005f, 0.335f, 0.401f, 0.85f}, // car select's
+};
+
+// A window's colour (RGB555): the sky, or the ground, that it reflects towards
+// the eye. View space: d from the eye to the car (not to the polygon, so a flat
+// pane cut in pieces is one colour), n its outward normal, up the car's up.
+uint16_t glass_color(const float d[3], const float n[3], const float up[3])
+{
+	auto dot = [](const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+	const float ln = std::sqrt(dot(n, n)), ld = std::sqrt(dot(d, d)), lu = std::sqrt(dot(up, up));
+	if (ln == 0 || ld == 0 || lu == 0) return 0x7fff;
+	const float dn = dot(d, n) / (ld * ln);
+	// the reflected ray (unit), its height towards the car's up: -1 the ground .. 1 straight up
+	const float r[3] = {d[0] / ld - 2 * dn * n[0] / ln, d[1] / ld - 2 * dn * n[1] / ln, d[2] / ld - 2 * dn * n[2] / ln};
+	const float e = std::clamp(dot(r, up) / lu, -1.0f, 1.0f);
+	static constexpr float kHorizon[3] = {0.82f, 0.88f, 0.95f}, kZenith[3] = {0.22f, 0.42f, 0.85f},
+	                       kGround[3] = {0.10f, 0.10f, 0.12f};
+	const float *to = e >= 0 ? kZenith : kGround;
+	const float t = e >= 0 ? std::sqrt(e) : std::min(1.0f, -4 * e);
+	uint16_t c = 0;
+	for (int k = 0; k < 3; k++)
+		c |= uint16_t(std::clamp(int(std::lround((kHorizon[k] + (to[k] - kHorizon[k]) * t) * 31)), 0, 31) << (5 * k));
+	return c;
+}
 }
 
 bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t count)
@@ -1730,6 +1767,14 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 		car_body_valid_ = true;
 		GeoPtr first = input;
 		first += 6; // past the two opening points: the first link's attributes (lighting parameters)
+		emit_car_tris(geo, mod->body, geo->matrix, *first, none);
+		end_object();
+		return true;
+	}
+	if (address == kCarBonnetView) // the custom car seen from its driver's seat (its inside faces culled)
+	{
+		GeoPtr first = input;
+		first += 6;
 		emit_car_tris(geo, mod->body, geo->matrix, *first, none);
 		end_object();
 		return true;
@@ -1757,12 +1802,13 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 		std::copy(saved, saved + 12, geo->matrix);
 		return true;
 	}
-	const bool right = address == kWheelRight;
-	if ((!right && address != kWheelLeft) || !car_body_valid_ || count == 0) return false;
+	const CarWheel *wheel = std::find_if(std::begin(kCarWheels), std::end(kCarWheels),
+	                                     [&](const CarWheel &w) { return w.address == address; });
+	if (wheel == std::end(kCarWheels) || !car_body_valid_ || count == 0) return false;
 
 	// the wheel's centre now, in the body's space (its matrix a rotation): which corner it is
 	const float *m = geo->matrix, *b = car_body_;
-	const float hub = right ? kWheelHub : -kWheelHub;
+	const float hub = wheel->right ? wheel->hub : -wheel->hub;
 	const float d[3] = {m[9] + hub * m[0] - b[9], m[10] + hub * m[1] - b[10], m[11] + hub * m[2] - b[11]};
 	const float o[3] = {d[0] * b[0] + d[1] * b[1] + d[2] * b[2], d[0] * b[3] + d[1] * b[4] + d[2] * b[5],
 	                    d[0] * b[6] + d[1] * b[7] + d[2] * b[8]};
@@ -1787,15 +1833,29 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 		end_object();
 		return true;
 	}
-	// the game's wheel, scaled to the custom one and centred on it; the light scaled back,
-	// as the normals are transformed by the scaled matrix
-	const float s = w[3] / kWheelRadius;
-	for (int i = 0; i < 9; i++) geo->matrix[i] = saved[i] * s;
-	for (int i = 0; i < 3; i++) geo->matrix[9 + i] = at[i] - s * hub * saved[i];
+	// the game's wheel, scaled to the custom one (its width to the custom tyres', if given) and
+	// centred on it; the light scaled back, as the normals are transformed by the scaled matrix
+	const float s = w[3] / wheel->radius * wheel->scale;
+	const float sx = mod->wheel_width > 0 ? mod->wheel_width * wheel->scale / wheel->width : s; // along the axle
+	for (int i = 0; i < 3; i++) geo->matrix[i] = saved[i] * sx;
+	for (int i = 3; i < 9; i++) geo->matrix[i] = saved[i] * s;
+	for (int i = 0; i < 3; i++) geo->matrix[9 + i] = at[i] - sx * hub * saved[i];
 	const GeoVertex light = geo->light;
 	geo->light.x /= s, geo->light.y /= s, geo->light.pz /= s;
+	const size_t first = polys.size();
 	parse_object(geo, input, count);
 	geo->light = light;
+	// sorted by their centres, as the custom car's own polygons (emit_car_tris), not by their
+	// nearest corners: else a tyre covers the arch around it
+	for (size_t i = first; i < polys.size(); i++)
+	{
+		GeoPoly &poly = polys[i];
+		float z = 0;
+		for (int k = 0; k < poly.num_vertices; k++) z += poly.v[k].pz;
+		poly.z = float_to_zval(z / poly.num_vertices, raster->z_adjust);
+		if (poly.z < raster->min_z) raster->min_z = poly.z;
+		if (poly.z > raster->max_z) raster->max_z = poly.z;
+	}
 	std::copy(saved, saved + 12, geo->matrix);
 	return true;
 }
@@ -1825,12 +1885,23 @@ void Geo::emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, co
 		const float dotl = dot_product(normal, geo->light);
 		float luminance = dotl * dotp < 0 ? 0.0f : std::fabs(dotl);
 		luminance = std::clamp(luminance * texparam->diffuse + texparam->ambient, 0.0f, 255.0f);
+		uint16_t color = t.color;
+		if (t.glass)
+		{
+			// a mirror: the sky's own light, whatever the sun
+			const float d[3] = {m[9], m[10], m[11]}, n[3] = {-normal.x, -normal.y, -normal.pz}, up[3] = {m[3], m[4], m[5]};
+			color = glass_color(d, n, up);
+			luminance = std::clamp(texparam->diffuse + texparam->ambient, 0.0f, 255.0f);
+		}
 		for (GeoVertex &p : v) apply_focus(geo, &p);
 		const float min_z = std::min({v[0].pz, v[1].pz, v[2].pz}), max_z = std::max({v[0].pz, v[1].pz, v[2].pz});
 		if (max_z < 0) continue;
 		if (raster->master_z_clip != 0xff && (int32_t)(1.0 / min_z) > raster->master_z_clip) continue;
 
-		// clipped and added as model2_3d_process_polygon adds the game's (z sort: the minimum z)
+		// clipped and added as model2_3d_process_polygon adds the game's. Sorted by its centre,
+		// not as the game's by its nearest corner: a custom car's large flat faces (a panel
+		// behind its grille) would cover the small parts in front of them when seen at an angle
+		const float sort_z = (v[0].pz + v[1].pz + v[2].pz) / 3;
 		GeoVertex vertices[2][8];
 		GeoVertex *verts_in = vertices[0], *verts_out = vertices[1];
 		for (int k = 0; k < 3; k++) verts_in[k] = v[k];
@@ -1847,11 +1918,11 @@ void Geo::emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, co
 		if (++raster->poly_list_index >= 32768) throw GeoFatal("SEGA 3D: Max polygon limit exceeded");
 		GeoPoly *poly = &polys.emplace_back();
 		poly->reverse = raster->reverse;
-		poly->z = float_to_zval(min_z, raster->z_adjust);
+		poly->z = float_to_zval(std::max(t.decal ? sort_z - kDecalBias : sort_z, min_z * 0.5f), raster->z_adjust);
 		for (uint16_t &h : poly->texheader) h = 0; // the solid renderer
 		poly->luma = uint8_t(int32_t(luminance));
 		poly->texlod = 0;
-		poly->direct_color = uint16_t(0x8000 | t.color);
+		poly->direct_color = uint16_t(0x8000 | color);
 		for (int i = 0; i < 4; i++) poly->viewport[i] = raster->viewport[i];
 		poly->center[0] = raster->center[raster->center_sel][0];
 		poly->center[1] = raster->center[raster->center_sel][1];

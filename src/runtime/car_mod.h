@@ -11,8 +11,11 @@
 // ground at y 0, as the game's car (tools/m2modeldump).
 //   m2car 1
 //   wheel FL|FR|RL|RR  x y z radius        the wheel centres
+//   wheelwidth W                           (optional) the tyres' width: the game's are drawn that wide
 //   body N                                 then N triangles:
 //   x y z  x y z  x y z  nx ny nz  rgb555  corners, outward normal, colour
+//                                          (+ 0x8000: glass, drawn reflecting the sky;
+//                                           + 0x10000: a decal, drawn over what it lies on)
 //   wheelmesh FL|FR|RL|RR N                (optional) that wheel's triangles, body space
 #pragma once
 
@@ -29,9 +32,12 @@ struct CarMod {
         float p[3][3];
         float n[3];
         uint16_t color; // RGB555
+        bool glass;     // a window: its colour the sky it reflects
+        bool decal;     // sorted a little nearer: over the faces it lies on (painter's order)
     };
     enum Corner { FL, FR, RL, RR };
     std::array<std::array<float, 4>, 4> wheels{}; // x y z radius, by Corner
+    float wheel_width = 0;                        // 0: the game's tyres scaled with their radius
     std::vector<Tri> body;
     std::array<std::vector<Tri>, 4> wheel_meshes; // empty: none in the file
     bool own_wheels = false; // draw wheel_meshes, else the game's wheels moved and scaled

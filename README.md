@@ -65,7 +65,9 @@ car:
     python3 scripts/make_car_mod.py car.obj build-daytona/models/car.m2car --length 3.05
 
 (`--forward`/`--up` for the model's axes, `--wheels-from` to take the wheels
-from another export of the same model.) Handling and collisions stay the
+from another export of the same model, `--wheels-m2car` to keep the wheels of an
+earlier `.m2car` of it; `--glass` or `--glass-band` for the windows, drawn
+reflecting the sky.) Handling and collisions stay the
 game's. `tools/m2modeldump` lists and exports the models the game draws
 (`scripts/obj_to_stl.py` makes them printable): for your own use only.
 

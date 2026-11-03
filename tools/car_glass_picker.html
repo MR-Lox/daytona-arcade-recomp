@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Car Glass Picker</title>
+<!--
+  Pick a custom car's windows (scripts/make_car_mod.py, runtime/car_mod.h):
+  open the OBJ, click or fill the faces that are glass, save the OBJ. The
+  saved OBJ is the same file with the glass faces in the material "Glass";
+  make it a .m2car with  make_car_mod.py car.obj car.m2car --glass "^Glass$".
+  Opening a saved OBJ again shows its glass, to go on. Runs in the browser,
+  the files stay on this computer.
+-->
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --line: #dcdcd8;
+    --accent: #2f6fdf; --glass: #59b6ff; --view: #20232a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181b; --panel: #222327; --text: #ececee; --muted: #9a9aa2; --line: #36373d;
+      --accent: #6c9cff; --glass: #59b6ff; --view: #101114;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181b; --panel: #222327; --text: #ececee; --muted: #9a9aa2; --line: #36373d;
+    --accent: #6c9cff; --glass: #59b6ff; --view: #101114;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; display: flex; }
+  aside { width: 300px; flex: none; background: var(--panel); border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+  main { flex: 1; position: relative; background: var(--view); min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; }
+  p { margin: 0 0 8px; color: var(--muted); }
+  button, label.file { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  button:hover, label.file:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  input[type=file] { display: none; }
+  input[type=range] { width: 100%; }
+  .stat { font-variant-numeric: tabular-nums; }
+  #groups { max-height: 240px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  #groups label { display: flex; gap: 6px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #drop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 16px; pointer-events: none; text-align: center; padding: 16px; }
+  #hint { position: absolute; left: 12px; bottom: 10px; color: #bbb; font-size: 12px; pointer-events: none; }
+  kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  @media (max-width: 720px) {
+    body { flex-direction: column; }
+    aside { width: 100%; max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<aside>
+  <h1>Vitres de la voiture</h1>
+  <p>Ouvre l'OBJ (et son .mtl), marque les facettes vitrées, puis enregistre l'OBJ.</p>
+  <div class="row">
+    <label class="file">Ouvrir OBJ + MTL…<input id="file" type="file" accept=".obj,.mtl" multiple></label>
+  </div>
+
+  <h2>Outil</h2>
+  <div class="row">
+    <button id="mGlass" class="on">Vitre</button>
+    <button id="mBody">Carrosserie</button>
+  </div>
+  <div class="row">
+    <button id="tFace" class="on">Facette</button>
+    <button id="tFill">Remplir</button>
+  </div>
+  <p id="fillopts">Remplir : facettes voisines à moins de <b id="angv">20</b>° l'une de l'autre.</p>
+  <input id="ang" type="range" min="1" max="60" value="20">
+  <div class="row"><label><input id="same" type="checkbox" checked> rester dans le même groupe</label></div>
+  <p>Clic : appliquer. Glisser avec <kbd>Maj</kbd> : peindre. Clic droit / molette : tourner, zoomer. <kbd>Ctrl</kbd>+<kbd>Z</kbd> : annuler.</p>
+  <div class="row">
+    <button id="undo" disabled>Annuler</button>
+    <button id="clear">Tout en carrosserie</button>
+  </div>
+
+  <h2>Résultat</h2>
+  <p class="stat" id="stat">Aucun modèle.</p>
+  <div class="row">
+    <button id="save" disabled>Enregistrer l'OBJ</button>
+  </div>
+  <p>Puis : <code>make_car_mod.py voiture.obj voiture.m2car --glass "^Glass$"</code> (avec tes options habituelles).</p>
+
+  <h2>Groupes affichés</h2>
+  <div class="row"><button id="all">Tous</button><button id="none">Aucun</button></div>
+  <div id="groups"></div>
+</aside>
+<main>
+  <canvas id="c"></canvas>
+  <div id="drop">Ouvre ou dépose ici un fichier .obj (et son .mtl)</div>
+  <div id="hint"></div>
+</main>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const GLASS = 'Glass';
+const $ = id => document.getElementById(id);
+const canvas = $('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 1000);
+const controls = new OrbitControls(camera, canvas);
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444450, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+scene.add(sun);
+
+let model = null;   // {lines, faces, tris, materials, groups, mesh, adjacency}
+let glass = null;   // Uint8Array per OBJ face
+let undoStack = [];
+let mode = 1;       // 1 glass, 0 body
+let tool = 'face';
+let hidden = new Set();
+
+function resize() {
+  const r = canvas.parentElement.getBoundingClientRect();
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / Math.max(1, r.height);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+function parseMtl(text) {
+  const out = {};
+  let cur = null;
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim().split(/\s+/);
+    if (t[0] === 'newmtl') cur = line.trim().slice(7).trim();
+    else if (t[0] === 'Kd' && cur !== null) out[cur] = [+t[1], +t[2], +t[3]];
+  }
+  return out;
+}
+
+function parseObj(text) {
+  const lines = text.split(/\r?\n/);
+  const verts = [], faces = [];
+  // a face in "Glass" (an OBJ saved here) is glass; its material stays the one before
+  let group = '', material = '', isGlass = false;
+  lines.forEach((line, li) => {
+    const t = line.trim().split(/\s+/);
+    if (t[0] === 'v') verts.push([+t[1], +t[2], +t[3]]);
+    else if (t[0] === 'g' || t[0] === 'o') group = t.slice(1).join(' ');
+    else if (t[0] === 'usemtl') {
+      const m = t.slice(1).join(' ');
+      isGlass = m === GLASS;
+      if (!isGlass) material = m;
+    } else if (t[0] === 'f') {
+      const vi = t.slice(1).map(c => { const i = parseInt(c.split('/')[0], 10); return i > 0 ? i - 1 : verts.length + i; });
+      faces.push({ line: li, vi, group, material, glass: isGlass });
+    }
+  });
+  return { lines, verts, faces };
+}
+
+function build(objText, mtl) {
+  const { lines, verts, faces } = parseObj(objText);
+  if (!faces.length) { alert('Aucune facette dans ce fichier.'); return; }
+  if (model) { scene.remove(model.mesh); model.mesh.geometry.dispose(); }
+  glass = Uint8Array.from(faces, f => f.glass ? 1 : 0);
+  const tris = [];      // [a, b, c, face]
+  faces.forEach((f, fi) => { for (let k = 1; k < f.vi.length - 1; k++) tris.push([f.vi[0], f.vi[k], f.vi[k + 1], fi]); });
+  const pos = new Float32Array(tris.length * 9), col = new Float32Array(tris.length * 9);
+  tris.forEach((t, i) => { for (let k = 0; k < 3; k++) pos.set(verts[t[k]], i * 9 + k * 3); });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: true });
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+
+  // triangle normals and neighbours (shared edges, by position)
+  const key = i => verts[i].map(c => c.toFixed(5)).join(',');
+  const normals = tris.map(t => {
+    const a = new THREE.Vector3(...verts[t[0]]), b = new THREE.Vector3(...verts[t[1]]), c = new THREE.Vector3(...verts[t[2]]);
+    return b.sub(a).cross(c.sub(a)).normalize();
+  });
+  const edges = new Map();
+  tris.forEach((t, i) => {
+    for (let k = 0; k < 3; k++) {
+      const p = key(t[k]), q = key(t[(k + 1) % 3]);
+      const e = p < q ? p + '|' + q : q + '|' + p;
+      if (!edges.has(e)) edges.set(e, []);
+      edges.get(e).push(i);
+    }
+  });
+  const adjacency = tris.map(() => []);
+  for (const list of edges.values())
+    for (const a of list) for (const b of list) if (a !== b) adjacency[a].push(b);
+
+  const groups = [...new Set(faces.map(f => f.group))];
+  model = { lines, faces, tris, materials: mtl, groups, mesh, normals, adjacency };
+  hidden = new Set();
+  undoStack = [];
+  geo.computeBoundingSphere();
+  const s = geo.boundingSphere;
+  controls.target.copy(s.center);
+  camera.position.copy(s.center).add(new THREE.Vector3(s.radius * 1.6, s.radius * 0.9, s.radius * 1.9));
+  camera.near = s.radius / 100; camera.far = s.radius * 20; camera.updateProjectionMatrix();
+  sun.position.copy(s.center).add(new THREE.Vector3(s.radius, s.radius * 2, s.radius * 1.5));
+  $('drop').style.display = 'none';
+  $('save').disabled = false;
+  listGroups();
+  paint();
+}
+
+function faceColor(fi) {
+  if (glass[fi]) return [0.35, 0.71, 1.0];
+  return model.materials[model.faces[fi].material] ?? [0.75, 0.75, 0.75];
+}
+
+function paint() {
+  const col = model.mesh.geometry.attributes.color, pos = model.mesh.geometry.attributes.position;
+  model.tris.forEach((t, i) => {
+    const c = faceColor(t[3]);
+    for (let k = 0; k < 3; k++) col.setXYZ(i * 3 + k, c[0], c[1], c[2]);
+  });
+  col.needsUpdate = true;
+  // hidden groups: their triangles collapsed out of sight
+  const geo = model.mesh.geometry;
+  geo.setDrawRange(0, Infinity);
+  const index = [];
+  model.tris.forEach((t, i) => { if (!hidden.has(model.faces[t[3]].group)) index.push(i * 3, i * 3 + 1, i * 3 + 2); });
+  geo.setIndex(index);
+  let n = 0;
+  for (const g of glass) n += g;
+  $('stat').textContent = `${model.faces.length} facettes, ${n} en vitre.`;
+  $('undo').disabled = !undoStack.length;
+}
+
+function listGroups() {
+  const box = $('groups');
+  box.textContent = '';
+  for (const g of model.groups) {
+    const l = document.createElement('label');
+    const c = document.createElement('input');
+    c.type = 'checkbox'; c.checked = !hidden.has(g);
+    c.onchange = () => { c.checked ? hidden.delete(g) : hidden.add(g); paint(); };
+    l.append(c, document.createTextNode(g || '(sans groupe)'));
+    l.title = g;
+    box.append(l);
+  }
+}
+
+// picking: the triangle under the pointer, among the shown ones
+const ray = new THREE.Raycaster();
+function pick(ev) {
+  if (!model) return -1;
+  const r = canvas.getBoundingClientRect();
+  const p = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(p, camera);
+  const hit = ray.intersectObject(model.mesh)[0];
+  return hit ? model.tris[hit.faceIndex][3] : -1;
+}
+
+function fill(fromFace) {
+  const limit = Math.cos(+$('ang').value * Math.PI / 180), same = $('same').checked;
+  const group = model.faces[fromFace].group;
+  const seen = new Uint8Array(model.tris.length), out = new Set();
+  const stack = [];
+  model.tris.forEach((t, i) => { if (t[3] === fromFace) { stack.push(i); seen[i] = 1; } });
+  while (stack.length) {
+    const i = stack.pop();
+    out.add(model.tris[i][3]);
+    for (const j of model.adjacency[i]) {
+      if (seen[j]) continue;
+      const f = model.faces[model.tris[j][3]];
+      if (hidden.has(f.group) || (same && f.group !== group)) continue;
+      if (Math.abs(model.normals[i].dot(model.normals[j])) < limit) continue;
+      seen[j] = 1;
+      stack.push(j);
+    }
+  }
+  return out;
+}
+
+let stroke = null; // the faces changed by the current click or drag, for undo
+function apply(fi) {
+  if (fi < 0) return;
+  const set = tool === 'fill' ? fill(fi) : [fi];
+  for (const f of set) {
+    if (glass[f] === mode) continue;
+    stroke.push([f, glass[f]]);
+    glass[f] = mode;
+  }
+  paint();
+}
+canvas.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0 || !model) return;
+  stroke = [];
+  apply(pick(ev));
+  canvas.setPointerCapture(ev.pointerId);
+});
+canvas.addEventListener('pointermove', ev => {
+  if (stroke && ev.shiftKey && tool === 'face') apply(pick(ev));
+  if (model) {
+    const fi = pick(ev);
+    $('hint').textContent = fi < 0 ? '' : `${model.faces[fi].group} · ${model.faces[fi].material}${glass[fi] ? ' · vitre' : ''}`;
+  }
+});
+canvas.addEventListener('pointerup', () => {
+  if (stroke && stroke.length) undoStack.push(stroke);
+  stroke = null;
+  if (model) paint();
+});
+canvas.addEventListener('contextmenu', ev => ev.preventDefault());
+
+function undo() {
+  const s = undoStack.pop();
+  if (!s) return;
+  for (let k = s.length - 1; k >= 0; k--) glass[s[k][0]] = s[k][1];
+  paint();
+}
+window.addEventListener('keydown', ev => { if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') { ev.preventDefault(); undo(); } });
+$('undo').onclick = undo;
+$('clear').onclick = () => {
+  if (!model) return;
+  const s = [];
+  glass.forEach((g, f) => { if (g) s.push([f, 1]); });
+  if (!s.length) return;
+  glass.fill(0);
+  undoStack.push(s);
+  paint();
+};
+
+function setMode(m) { mode = m; $('mGlass').classList.toggle('on', m === 1); $('mBody').classList.toggle('on', m === 0); }
+function setTool(t) { tool = t; $('tFace').classList.toggle('on', t === 'face'); $('tFill').classList.toggle('on', t === 'fill'); }
+$('mGlass').onclick = () => setMode(1);
+$('mBody').onclick = () => setMode(0);
+$('tFace').onclick = () => setTool('face');
+$('tFill').onclick = () => setTool('fill');
+$('ang').oninput = () => { $('angv').textContent = $('ang').value; };
+$('all').onclick = () => { if (!model) return; hidden.clear(); listGroups(); paint(); };
+$('none').onclick = () => { if (!model) return; hidden = new Set(model.groups); listGroups(); paint(); };
+
+// the OBJ as it came, its glass faces in the material "Glass"
+let fileName = 'car.obj';
+$('save').onclick = () => {
+  const byLine = new Map(model.faces.map((f, i) => [f.line, i]));
+  const out = [];
+  let current = null;
+  model.lines.forEach((line, li) => {
+    const t = line.trim().split(/\s+/);
+    if (t[0] === 'usemtl') return; // written again before the faces that need it
+    if (byLine.has(li)) {
+      const fi = byLine.get(li);
+      const want = glass[fi] ? GLASS : model.faces[fi].material;
+      if (want !== current) { out.push('usemtl ' + want); current = want; }
+    }
+    out.push(line);
+  });
+  const blob = new Blob([out.join('\n') + '\n'], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName.replace(/\.obj$/i, '') + '_vitres.obj';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
+async function open(files) {
+  files = [...files];
+  const obj = files.find(f => /\.obj$/i.test(f.name));
+  const mtl = files.find(f => /\.mtl$/i.test(f.name));
+  if (!obj) { alert('Choisis un fichier .obj (et son .mtl en même temps pour les couleurs).'); return; }
+  fileName = obj.name;
+  build(await obj.text(), mtl ? parseMtl(await mtl.text()) : {});
+}
+$('file').onchange = ev => open(ev.target.files);
+const main = canvas.parentElement;
+main.addEventListener('dragover', ev => ev.preventDefault());
+main.addEventListener('drop', ev => { ev.preventDefault(); open(ev.dataTransfer.files); });
+
+resize();
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.setClearColor(getComputedStyle(document.body).getPropertyValue('--view').trim() || '#20232a');
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
