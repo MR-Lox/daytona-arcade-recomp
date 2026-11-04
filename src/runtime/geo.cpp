@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
 #include "compat/bit_cast.h"
 namespace rt {
 
@@ -1709,19 +1710,41 @@ void Geo::parse_object(geo_state *geo, GeoPtr obp, uint32_t obc)
    model of the bonnet and dashboard in the body's space. */
 namespace {
 // the body and its part: the automatic's and the manual's (another livery), and the same in
-// the polygon ROM's other copy; then the body dented by crashes, the automatic's and the
-// manual's in 7 stages each (in both copies; found as the models whose polygons are the body's
-// with other vertices)
-constexpr uint32_t kCarBodies[] = {
-	0x0095ff9d, 0x00960dae, 0x009dff9d, 0x009e0dae,
-	0x008dda42, 0x008de853, 0x008df664, 0x008e1286, 0x008e2ea8, 0x008e4aca, 0x008e830e,
-	0x008ebb52, 0x008ec963, 0x008ed774, 0x008ef396, 0x008f0fb8, 0x008f2bda, 0x008f641e,
-	0x0085da42, 0x0085e853, 0x0085f664, 0x00861286, 0x00862ea8, 0x00864aca, 0x0086830e,
-	0x0086bb52, 0x0086c963, 0x0086d774, 0x0086f396, 0x00870fb8, 0x00872bda, 0x0087641e,
-};
+// the polygon ROM's other copy
+constexpr uint32_t kCarBodies[] = {0x0095ff9d, 0x00960dae, 0x009dff9d, 0x009e0dae};
+// the body dented by crashes (main_data's model table, from 0x843bb0): 2 sets of 16 models one
+// after the other, in both copies. Each set: the 15 combinations of dented corners (0-3 one
+// corner, 4-9 two, 10-13 three, 14 all four), then 15, all four and more
+constexpr uint32_t kCarDentedBodies[] = {0x008dcc31, 0x0085cc31};
+constexpr uint32_t kCarBodyWords = 0xe11, kCarDentedBodyCount = 32;
+// the dents with both rear corners dented, where a custom car's own crashed model (CarMod::damaged) shows
+constexpr int kCarRearDents[] = {5, 12, 13, 14, 15};
+// the dents with a front corner dented, which open a custom car's hood
+constexpr int kCarFrontDents[] = {0, 1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+constexpr float kCarHoodOpen = 8 * 3.14159265f / 180; // radians
+// The game's pointer to the player's body in its model table (main_data), in work RAM. It is
+// there in the bonnet view, where no body is drawn, but stays as it was after a race: trusted
+// only when it changes. The dented models' entries, 20 bytes each, as kCarDentedBodies.
+constexpr uint32_t kCarBodyPointer = 0x5194, kCarDentedEntries = 0x02843bb0, kCarEntryBytes = 20;
+// which of a set's 16 dented models this body is, or -1
+int car_body_dent(uint32_t address)
+{
+	for (uint32_t first : kCarDentedBodies)
+		if (address >= first && address < first + kCarDentedBodyCount * kCarBodyWords && (address - first) % kCarBodyWords == 0)
+			return int((address - first) / kCarBodyWords % 16);
+	return -1;
+}
+bool is_car_body(uint32_t address)
+{
+	return car_body_dent(address) >= 0 || std::find(std::begin(kCarBodies), std::end(kCarBodies), address) != std::end(kCarBodies);
+}
 constexpr uint32_t kCarBodyParts[] = {0x00961bbf, 0x00961cb0, 0x009e1bbf, 0x009e1cb0};
 constexpr uint32_t kCarShadow = 0x008d7ab7, kCarReflection = 0x00000004;
-constexpr uint32_t kCarBonnetView = 0x0094fff9;
+// the automatic's and the manual's, in both copies, then its dented versions (the table's other 170-polygon models)
+constexpr uint32_t kCarBonnetViews[] = {0x0094fff9, 0x009506a8, 0x009cfff9, 0x009d06a8, 0x00a0027c,
+                                        0x00a0092b, 0x00a00fda, 0x00a01689, 0x00a01d38, 0x00a023e7};
+constexpr uint32_t kCarBodyLinks = 359;
+constexpr float kCarBodyHalfWidth = 0.865f, kCarBodyHalfLength = 2.465f, kCarBodyMiddle = 0.005f;
 // how much nearer a decal sorts (a headlight's cross on its lens): the polygons are drawn
 // nearest first and none paints over another, so the part on top must sort first
 constexpr float kDecalBias = 0.06f;
@@ -1773,21 +1796,33 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 	// the rasterizer's end of an object, as after a parse: two points, then attribute 0
 	auto end_object = [&] { for (int i = 0; i < 7; i++) model2_3d_push(raster, 0); };
 	const float none[3] = {0, 0, 0};
-	if (std::find(std::begin(kCarBodies), std::end(kCarBodies), address) != std::end(kCarBodies))
+	if (is_car_body(address))
 	{
 		std::copy(geo->matrix, geo->matrix + 12, car_body_);
 		car_body_valid_ = true;
 		GeoPtr first = input;
 		first += 6; // past the two opening points: the first link's attributes (lighting parameters)
-		emit_car_tris(geo, mod->body, geo->matrix, *first, none);
+		car_dent_ = car_body_dent(address);
+		if (work_ram_) std::memcpy(&car_body_pointer_, work_ram_ + kCarBodyPointer, 4);
+		emit_car_tris(geo, dented_car_body(*mod, car_dent_, input, geo->polygon_rom_mask), geo->matrix, *first, none);
 		end_object();
 		return true;
 	}
-	if (address == kCarBonnetView) // the custom car seen from its driver's seat (its inside faces culled)
+	// the custom car seen from its driver's seat (its inside faces culled)
+	if (std::find(std::begin(kCarBonnetViews), std::end(kCarBonnetViews), address) != std::end(kCarBonnetViews))
 	{
+		uint32_t pointer = car_body_pointer_;
+		if (work_ram_) std::memcpy(&pointer, work_ram_ + kCarBodyPointer, 4);
+		if (pointer != car_body_pointer_)
+		{
+			car_body_pointer_ = pointer;
+			const uint32_t entry = pointer - kCarDentedEntries;
+			car_dent_ = entry < kCarDentedBodyCount * kCarEntryBytes && entry % kCarEntryBytes == 0
+				? int(entry / kCarEntryBytes % 16) : -1;
+		}
 		GeoPtr first = input;
 		first += 6;
-		emit_car_tris(geo, mod->body, geo->matrix, *first, none);
+		emit_car_tris(geo, dented_car_body(*mod, car_dent_, input, geo->polygon_rom_mask), geo->matrix, *first, none, true);
 		end_object();
 		return true;
 	}
@@ -1876,8 +1911,119 @@ bool Geo::draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t 
 	return true;
 }
 
+const std::vector<CarMod::Tri> &Geo::dented_car_body(const CarMod &mod, int dent, GeoPtr rom, uint32_t rom_mask)
+{
+	if (dent < 0) return mod.body;
+	if (car_dented_for_ != car_mod())
+	{
+		for (auto &tris : car_dented_) tris.clear();
+		car_dented_for_ = car_mod();
+	}
+	std::vector<CarMod::Tri> &tris = car_dented_[dent];
+	if (!tris.empty()) return tris;
+	// its own crashed model has the rear's damage: only the front's dents are added to it
+	const bool own = !mod.damaged.empty() && std::find(std::begin(kCarRearDents), std::end(kCarRearDents), dent) != std::end(kCarRearDents);
+
+	// The game's dent: how far each point of its body moves, from its intact model to this one
+	// (the same polygons, 10 words a link after the 6 of the two opening points).
+	struct Point
+	{
+		float p[3], d[3];
+	};
+	std::vector<Point> points;
+	GeoPtr dented = rom, intact = rom;
+	dented.i = (kCarDentedBodies[0] + uint32_t(dent) * kCarBodyWords) & rom_mask;
+	intact.i = kCarBodies[0] & rom_mask;
+	auto read_point = [&] {
+		Point pt;
+		for (int k = 0; k < 3; k++)
+		{
+			pt.p[k] = u2f(*intact++);
+			pt.d[k] = u2f(*dented++) - pt.p[k];
+		}
+		if (own && pt.p[2] < 0) pt.d[0] = pt.d[1] = pt.d[2] = 0;
+		points.push_back(pt);
+	};
+	read_point();
+	read_point();
+	for (uint32_t i = 0; i < kCarBodyLinks; i++)
+	{
+		intact += 4; // the attributes and the normal
+		dented += 4;
+		read_point();
+		read_point();
+	}
+
+	// Each point of the custom car moves as the game's points around the same place on the car do
+	// (weighted by nearness, the ones that stay still included), in proportion to the two cars'
+	// sizes. Height is the same on both.
+	const float sx = kCarBodyHalfWidth * 2 / (mod.hi[0] - mod.lo[0]), sz = kCarBodyHalfLength * 2 / (mod.hi[2] - mod.lo[2]);
+	const float mz = (mod.hi[2] + mod.lo[2]) / 2;
+	std::map<std::array<float, 3>, std::array<float, 3>> moved;
+	auto move = [&](const float *v) -> const std::array<float, 3> & {
+		auto [it, added] = moved.try_emplace(std::array<float, 3>{v[0], v[1], v[2]});
+		if (added)
+		{
+			const float at[3] = {v[0] * sx, v[1], (v[2] - mz) * sz + kCarBodyMiddle};
+			float sum = 0, d[3] = {0, 0, 0};
+			for (const Point &pt : points)
+			{
+				const float dx = at[0] - pt.p[0], dy = at[1] - pt.p[1], dz = at[2] - pt.p[2];
+				const float dist = dx * dx + dy * dy + dz * dz + 1e-3f, w = 1 / (dist * dist);
+				sum += w;
+				for (int k = 0; k < 3; k++) d[k] += w * pt.d[k];
+			}
+			it->second = {v[0] + d[0] / sum / sx, v[1] + d[1] / sum, v[2] + d[2] / sum / sz};
+		}
+		return it->second;
+	};
+	tris = own ? mod.damaged : mod.body;
+	for (CarMod::Tri &t : tris)
+	{
+		if (t.hood) continue; // a rigid panel: it only opens, below
+		for (auto &p : t.p)
+		{
+			const auto &to = move(p);
+			std::copy(to.begin(), to.end(), p);
+		}
+		if (t.glass) continue; // its normal kept: a pane in pieces reflects one colour (glass_color)
+		// its new normal, on the side of the old one
+		const float a[3] = {t.p[1][0] - t.p[0][0], t.p[1][1] - t.p[0][1], t.p[1][2] - t.p[0][2]};
+		const float b[3] = {t.p[2][0] - t.p[0][0], t.p[2][1] - t.p[0][1], t.p[2][2] - t.p[0][2]};
+		float n[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+		const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+		if (len == 0) continue;
+		const float side = n[0] * t.n[0] + n[1] * t.n[1] + n[2] * t.n[2] < 0 ? -1 / len : 1 / len;
+		for (int k = 0; k < 3; k++) t.n[k] = n[k] * side;
+	}
+	if (std::find(std::begin(kCarFrontDents), std::end(kCarFrontDents), dent) != std::end(kCarFrontDents))
+	{
+		// the hood opens a little, about its rear edge
+		float hinge_y = 0, hinge_z = std::numeric_limits<float>::max();
+		for (const CarMod::Tri &t : tris)
+			if (t.hood)
+				for (const auto &p : t.p)
+					if (p[2] < hinge_z) hinge_z = p[2], hinge_y = p[1];
+		const float c = std::cos(kCarHoodOpen), s = std::sin(kCarHoodOpen);
+		for (CarMod::Tri &t : tris)
+		{
+			if (!t.hood) continue;
+			for (auto &p : t.p)
+			{
+				const float y = p[1] - hinge_y, z = p[2] - hinge_z;
+				p[1] = hinge_y + y * c + z * s;
+				p[2] = hinge_z + z * c - y * s;
+			}
+			const float ny = t.n[1], nz = t.n[2];
+			t.n[1] = ny * c + nz * s;
+			t.n[2] = nz * c - ny * s;
+		}
+	}
+	return tris;
+}
+
 void Geo::emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, const float *matrix, uint32_t attr,
-                        const float offset[3])
+                        const float offset[3], bool bonnet_view)
 {
 	raster_state *raster = geo->raster;
 	float m[12];
@@ -1885,6 +2031,8 @@ void Geo::emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, co
 	const texture_parameter *texparam = &geo->texture_parameters[(attr >> 18) & 0x1f];
 	for (const CarMod::Tri &t : tris)
 	{
+		// from the driver's seat, nor the hood's rear face (the hood is a block, seen from behind)
+		if (bonnet_view && (t.no_bonnet || (t.hood && t.n[2] < -0.5f))) continue;
 		// The game's normals face in: a polygon is its front when normal . point >= 0 (geo_parse_np_ns).
 		GeoVertex normal, v[3];
 		normal.x = -t.n[0], normal.y = -t.n[1], normal.pz = -t.n[2];

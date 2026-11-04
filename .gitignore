@@ -37,6 +37,9 @@ dumps/
 *.m2tr
 *.m2in
 
+# ---- Your own local files (e.g. local/daytona.ico, the game's icon) ----
+local/
+
 # ---- Build output ----
 build/
 build-*/

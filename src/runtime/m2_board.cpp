@@ -129,6 +129,7 @@ M2Board::M2Board(Images images)
 #else
     geo_ = std::make_unique<Geo>(img_.polygons, img_.textures, tgp_.buffer_data());
 #endif
+    geo_->set_work_ram(work_.data());
     video_ = std::make_unique<Video>(tile_.data(), chr_.data());
     video_->enable_write_tracking();
 }

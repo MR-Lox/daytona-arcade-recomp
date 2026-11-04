@@ -32,6 +32,12 @@ int main() {
     check(car && car->body.size() == 1 && car->wheel_meshes[rt::CarMod::FL].size() == 1, "a small car loads");
     check(car && car->body[0].color == 31 && car->wheels[rt::CarMod::RR][2] == -1.0f, "its colour and wheels");
     check(car && car->lo[0] == 0 && car->hi[0] == 1 && car->hi[2] == 2, "its extent");
+    auto crashed = rt::CarMod::load(write("car_damaged.m2car", "m2car 1\n" + wheels + "body 1\n" + tri + "damaged 2\n" + tri +
+                                                                   "0 0 0  1 0 0  0 1 2  0 0 1  " + std::to_string(31 + 0x60000) + "\n"),
+                                    &error);
+    check(crashed && crashed->damaged.size() == 2 && crashed->body.size() == 1, "a crashed model loads");
+    check(crashed && !crashed->damaged[0].hood && crashed->damaged[1].hood && crashed->damaged[1].no_bonnet &&
+              crashed->damaged[1].color == 31, "its hood and hidden parts");
     check(!rt::CarMod::load(write("car_wheels.m2car", "m2car 1\nwheel FL 0 0 0 0.3\nbody 1\n" + tri), &error),
           "four wheels are needed");
     check(!rt::CarMod::load(write("car_body.m2car", "m2car 1\n" + wheels), &error), "a body is needed");

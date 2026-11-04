@@ -16,7 +16,9 @@
 #include "runtime/car_mod.h"
 #include "runtime/rom_source.h"
 
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -192,6 +194,7 @@ public:
         int32_t current = -1; // the object being parsed, -1 outside one
     };
     Capture *capture = nullptr;
+    void set_work_ram(const uint8_t *ram) { work_ram_ = ram; } // where the custom car finds its damage
 
     // This frame's output.
     std::vector<GeoPoly> polys;       // kept polygons, in the order added
@@ -276,8 +279,15 @@ private:
     // object (the body, its parts, the wheels moved under it).
     bool draw_car_mod(geo_state *geo, uint32_t address, GeoPtr input, uint32_t count);
     void emit_car_tris(geo_state *geo, const std::vector<CarMod::Tri> &tris, const float *matrix, uint32_t attr,
-                       const float offset[3]);
+                       const float offset[3], bool bonnet_view = false);
+    // The custom car dented as the game's dented model (-1: intact, mod.body); rom: any polygon ROM pointer.
+    const std::vector<CarMod::Tri> &dented_car_body(const CarMod &mod, int dent, GeoPtr rom, uint32_t rom_mask);
     void parse_object(geo_state *geo, GeoPtr input, uint32_t count);
+    std::array<std::vector<CarMod::Tri>, 16> car_dented_; // by dent model, made when first needed
+    std::shared_ptr<const CarMod> car_dented_for_;
+    const uint8_t *work_ram_ = nullptr; // the game's work RAM (0x00500000)
+    int car_dent_ = -1;                 // the player's body now: the last drawn, or the game's pointer when it changed
+    uint32_t car_body_pointer_ = 0;     // that pointer as last read
     float car_body_[12] = {};   // the custom car's body matrix this frame
     bool car_body_valid_ = false;
     void model2_3d_push(raster_state *raster, uint32_t input);
