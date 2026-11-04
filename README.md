@@ -67,7 +67,10 @@ car:
 (`--forward`/`--up` for the model's axes, `--wheels-from` to take the wheels
 from another export of the same model, `--wheels-m2car` to keep the wheels of an
 earlier `.m2car` of it; `--glass` or `--glass-band` for the windows, drawn
-reflecting the sky.) Handling and collisions stay the
+reflecting the sky; `--hood` for a hood that opens after a hit at the front,
+`--no-bonnet` for parts hidden in the bonnet view, `--damaged` for your own model
+of the crashed car, shown once both rear corners are dented.) Crashes dent the
+car as they dent the game's own. Handling and collisions stay the
 game's. `tools/m2modeldump` lists and exports the models the game draws
 (`scripts/obj_to_stl.py` makes them printable): for your own use only.
 

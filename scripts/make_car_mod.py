@@ -6,6 +6,7 @@ player's car (Revision A).
   make_car_mod.py IN.obj OUT.m2car [--length 3.05] [--forward +x] [--up +y]
                   [--wheels REGEX] [--skip REGEX] [--wheels-from OTHER.obj | --wheels-m2car OLD.m2car]
                   [--glass REGEX] [--glass-band REGEX:LO:HI] [--wheel-width W] [--wheel-inset D] [--decal REGEX]
+                  [--damaged DAMAGED.obj] [--no-bonnet REGEX] [--hood REGEX]
 
 --length: the car's real length in metres (the model is scaled to it).
 --forward, --up: the model's axes (+x, -z, ...); its right is forward x up,
@@ -27,6 +28,12 @@ picks windows by hand: it saves the OBJ with them in the material "Glass"
 (then --glass "^Glass$").
 --decal: groups or materials that lie on other faces (a headlight's cross on
 its lens, a badge): the game sorts them a little nearer, so they stay on top.
+--damaged: your own model of the crashed car, in the same coordinates (an edit
+of the same model): the game shows it once both rear corners are dented, with
+the front's dents added. Its faces that are glass in the main model stay glass.
+--no-bonnet: groups or materials not drawn in the bonnet view (the wipers).
+--hood: groups or materials that are the hood: it opens a little, on its rear
+edge, once the front is dented.
 --wheel-inset: the wheels moved D metres towards the middle, under the arches
 (a tyre flush with an arch's edge fights it in the game's sort).
 --max-edge: large triangles are cut into pieces with edges up to this long
@@ -187,6 +194,9 @@ def main():
     ap.add_argument("--decal", default=None)
     ap.add_argument("--max-edge", type=float, default=0.3)
     ap.add_argument("--wheel-inset", type=float, default=0.0)
+    ap.add_argument("--damaged", default=None)
+    ap.add_argument("--no-bonnet", default=None)
+    ap.add_argument("--hood", default=None)
     args = ap.parse_args()
 
     forward, up = AXES[args.forward], AXES[args.up]
@@ -218,15 +228,16 @@ def main():
     corners = {c: [] for c in ("FL", "FR", "RL", "RR")}
     if args.wheels_m2car:
         wheels, shift = like_m2car(args.wheels_m2car, [game[i] for i in used])
-        game = [(p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]) for p in game]
     else:
         wheels = place_on_wheels(faces, wheel_re, game, corners)
-        game = [(p[0] + wheels["shift"][0], p[1] + wheels["shift"][1], p[2] + wheels["shift"][2]) for p in game]
-        del wheels["shift"]
+        shift = wheels.pop("shift")
+    game = [(p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]) for p in game]
     for w in wheels.values():
         w[0] -= math.copysign(args.wheel_inset, w[0])
     glass_re = re.compile(args.glass, re.I) if args.glass else None
     decal_re = re.compile(args.decal, re.I) if args.decal else None
+    no_bonnet_re = re.compile(args.no_bonnet, re.I) if args.no_bonnet else None
+    hood_re = re.compile(args.hood, re.I) if args.hood else None
     band = None
     if args.glass_band:
         name, lo, hi = args.glass_band.rsplit(":", 2)
@@ -242,7 +253,7 @@ def main():
             return True
         return bool(band and band[0].search(group) and band[1] <= tri_centre_y - GROUND <= band[2] and abs(normal_y) < 0.7)
 
-    def triangles(fs):
+    def triangles(fs, verts=verts, normals=normals, game=game, is_glass=None):
         out = []
         for vi, ni, group, material in fs:
             # the face's outward normal: its winding's (OBJ space), turned to agree with its vertex normals
@@ -259,10 +270,14 @@ def main():
                 continue
             gn = (dot(n, right) / ln, dot(n, up) / ln, dot(n, forward) / ln)
             col = color(material)
-            if glass(group, material, sum(game[i][1] for i in vi) / len(vi), gn[1]):
+            if is_glass(vi) if is_glass else glass(group, material, sum(game[i][1] for i in vi) / len(vi), gn[1]):
                 col |= 0x8000  # glass (runtime/car_mod.h)
             if decal_re and (decal_re.search(group) or decal_re.search(material)):
                 col |= 0x10000  # a decal
+            if no_bonnet_re and (no_bonnet_re.search(group) or no_bonnet_re.search(material)):
+                col |= 0x20000
+            if hood_re and (hood_re.search(group) or hood_re.search(material)):
+                col |= 0x40000
             for k in range(1, len(vi) - 1):
                 tri = (game[vi[0]], game[vi[k]], game[vi[k + 1]])
                 c = cross(sub(tri[1], tri[0]), sub(tri[2], tri[0]))
@@ -271,7 +286,23 @@ def main():
                 out += [t + (gn, col) for t in split(tri, args.max_edge)]
         return out
 
-    body = triangles([f for f in faces if not wheel_re.search(f[2])])
+    body_faces = [f for f in faces if not wheel_re.search(f[2])]
+    body = triangles(body_faces)
+    damaged = []
+    if args.damaged:  # placed as the main model; glass where the same face is glass in it
+        dv, dn, df, dm = load(args.damaged)
+        materials.update(dm)
+        dgame = [tuple(c * scale + s for c, s in zip((dot(v, right), dot(v, up), dot(v, forward)), shift)) for v in dv]
+        face_key = lambda vs, vi: tuple(sorted(tuple(round(c, 3) for c in vs[i]) for i in vi))
+        glass_faces = set()
+        for vi, _, group, material in body_faces:
+            # as triangles() decides, from the face's normal only where a band needs it
+            n = cross(sub(verts[vi[1]], verts[vi[0]]), sub(verts[vi[2]], verts[vi[0]]))
+            ln = math.sqrt(dot(n, n)) or 1
+            if glass(group, material, sum(game[i][1] for i in vi) / len(vi), dot(n, up) / ln):
+                glass_faces.add(face_key(verts, vi))
+        df = [f for f in df if not (skip_re and skip_re.search(f[2])) and not wheel_re.search(f[2])]
+        damaged = triangles(df, dv, dn, dgame, lambda vi: face_key(dv, vi) in glass_faces)
     with open(args.out, "w") as o:
         o.write("m2car 1\n# made by make_car_mod.py from %s: metres, x right, y up, z ahead\n" % args.obj.rsplit("/", 1)[-1])
         for name in ("FL", "FR", "RL", "RR"):
@@ -285,6 +316,8 @@ def main():
                 o.write("%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %.3f %d\n" % (*a, *b, *c, *n, col))
 
         write("body", body)
+        if damaged:
+            write("damaged", damaged)
         for name in ("FL", "FR", "RL", "RR"):
             if corners[name]:
                 write("wheelmesh " + name, triangles(corners[name]))

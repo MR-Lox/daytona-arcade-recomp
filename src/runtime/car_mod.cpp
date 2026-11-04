@@ -34,6 +34,8 @@ bool read_tris(std::istream &in, size_t count, std::vector<CarMod::Tri> &out) {
         t.color = uint16_t(color & 0x7fff);
         t.glass = (color & 0x8000) != 0;
         t.decal = (color & 0x10000) != 0;
+        t.no_bonnet = (color & 0x20000) != 0;
+        t.hood = (color & 0x40000) != 0;
         out.push_back(t);
     }
     return true;
@@ -78,6 +80,11 @@ std::shared_ptr<CarMod> CarMod::load(const std::string &path, std::string *error
             in >> count;
             if (!in || count > 200000) return fail("bad " + word + " count");
             if (!read_tris(in, count, c < 0 ? mod->body : mod->wheel_meshes[c])) return fail("bad " + word + " data");
+        } else if (word == "damaged") {
+            size_t count = 0;
+            in >> count;
+            if (!in || count > 200000) return fail("bad damaged count");
+            if (!read_tris(in, count, mod->damaged)) return fail("bad damaged data");
         } else if (!word.empty() && word[0] == '#') {
             std::getline(in, word);
         } else {

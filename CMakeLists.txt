@@ -313,6 +313,12 @@ if(EXISTS ${GEN_DIR}/gen_table.cpp AND EXISTS ${TGP_GEN} AND EXISTS ${SND_GEN})
         target_link_libraries(daytona PRIVATE runtime imgui gpurender ${M2_SDL_TARGET})
         if(WIN32)
             target_link_libraries(daytona PRIVATE ws2_32) # link play's sockets
+            # Your own icon for the executable and its window, if you have one: local/ is git-ignored
+            if(EXISTS ${CMAKE_SOURCE_DIR}/local/daytona.ico)
+                enable_language(RC)
+                file(WRITE ${CMAKE_BINARY_DIR}/daytona_icon.rc "1 ICON \"${CMAKE_SOURCE_DIR}/local/daytona.ico\"")
+                target_sources(daytona PRIVATE ${CMAKE_BINARY_DIR}/daytona_icon.rc)
+            endif()
         endif()
         # Headless frames through the hardware renderer, to compare with m2run's.
         add_executable(m2gpushot tools/m2gpushot/main.cpp ${GEN_SOURCES} ${TGP_GEN} ${SND_GEN})
